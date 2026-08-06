@@ -46,7 +46,6 @@
     "prettier": "^3.4.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.21.0",
-    "undici": "^7.29.0",
     "wrangler": "^4.119.0"
   },
   "engines": {
@@ -54,9 +53,6 @@
   },
   "overrides": {
     "brace-expansion": "5.0.9",
-    "miniflare": {
-      "undici": "$undici"
-    },
     "minimatch": "^10.2.5"
   },
   "lint-staged": {
