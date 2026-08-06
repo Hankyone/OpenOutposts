@@ -17,8 +17,6 @@ no reachable local filesystem or local shell.
 A homestead machine can also be enrolled as an outpost. Even then, the agent does not get
 homestead-local tools; work still goes through an outpost lease.
 
-OpenOutposts does not host homesteads for you.
-
 ## Outpost
 
 An **outpost** is where work happens. A Go worker makes an outbound connection to the control plane,
