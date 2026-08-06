@@ -8,7 +8,7 @@ The control plane and UI are derived from
 by [Devin Outposts](https://docs.devin.ai/cloud/outposts/overview): the agent runs centrally; leased
 work runs on your machines. Not affiliated with Cognition or Devin.
 
-![Architecture: Web UI to control plane to homestead to leased outpost; many of each machine role](docs/architecture.svg)
+![Architecture: Web UI to control plane to homestead to leased outpost; many of each machine role](docs/architecture.png)
 
 ## Homestead
 

@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="920" height="240" viewBox="0 0 920 240" role="img" aria-labelledby="title desc">
   <title id="title">OpenOutposts architecture</title>
   <desc id="desc">The web UI talks to the control plane. A homestead runs the agent. Leased tool calls reach an outpost where work runs. You can run many homesteads and many outposts.</desc>
@@ -17,7 +18,7 @@
   <rect x="202" y="72" width="156" height="96" rx="10" fill="#fff" stroke="#c9c6bc" stroke-width="1.5"/>
   <text x="280" y="112" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="600" fill="#1a1a18">Control plane</text>
   <text x="280" y="134" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#6b6a63">Cloudflare</text>
-  <text x="280" y="152" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#6b6a63">routing · leases</text>
+  <text x="280" y="152" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#6b6a63">routing Â· leases</text>
 
   <path d="M368 120 H394" stroke="#8a887f" stroke-width="1.75" fill="none"/>
   <path d="M394 120 L384 115 V125 Z" fill="#8a887f"/>
@@ -41,7 +42,7 @@
   <rect x="636" y="64" width="250" height="96" rx="10" fill="#f3f1ea" stroke="#c9c6bc" stroke-width="1"/>
   <rect x="626" y="72" width="250" height="96" rx="10" fill="#fff" stroke="#c9c6bc" stroke-width="1.5"/>
   <text x="751" y="108" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="600" fill="#1a1a18">Outpost</text>
-  <text x="751" y="130" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#6b6a63">Go worker · outbound</text>
+  <text x="751" y="130" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#6b6a63">Go worker Â· outbound</text>
   <text x="751" y="148" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#6b6a63">work happens here</text>
   <text x="751" y="192" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#8a887f">many</text>
 </svg>
