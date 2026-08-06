@@ -8,6 +8,8 @@ The control plane and UI are derived from
 by [Devin Outposts](https://docs.devin.ai/cloud/outposts/overview): the agent runs centrally; leased
 work runs on your machines. Not affiliated with Cognition or Devin.
 
+![Architecture: Web UI to control plane to homestead to leased outpost; many of each machine role](docs/architecture.svg)
+
 ## Homestead
 
 A **homestead** is where the agent lives. Today that means [Pi](https://pi.dev) embedded in the
@@ -16,6 +18,8 @@ no reachable local filesystem or local shell.
 
 A homestead machine can also be enrolled as an outpost. Even then, the agent does not get
 homestead-local tools; work still goes through an outpost lease.
+
+OpenOutposts does not host homesteads for you.
 
 ## Outpost
 
