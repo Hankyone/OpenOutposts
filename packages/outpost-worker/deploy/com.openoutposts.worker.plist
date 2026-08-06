@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OpenOutposts worker — launchd agent for macOS.
+
+  Loaded as a user agent so the worker acts as the logged-in account, with
+  that account's SSH keys and git credential helpers, which is what makes
+  machine-authenticated clones work. A Mac that should keep working through
+  logout wants a LaunchDaemon in /Library/LaunchDaemons instead, with a
+  UserName key naming the account.
+
+  The binary lives under this user's home rather than in /usr/local/bin. The
+  worker updates itself in place — it downloads a signed release, replaces its
+  own binary, and re-executes — and it can only do that where it may write. A
+  root-owned install directory disables self-update and leaves the Mac on
+  whatever build it was installed with.
+
+  Install after running the Machines-page enrollment command as this user:
+    mkdir -p ~/.local/bin
+    install -m 0755 openoutpost ~/.local/bin/openoutpost
+    cp com.openoutposts.worker.plist ~/Library/LaunchAgents/
+    chmod 600 ~/Library/LaunchAgents/com.openoutposts.worker.plist
+    # Replace USERNAME in ProgramArguments below with `id -un`.
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openoutposts.worker.plist
+
+  Stop it with:
+    launchctl bootout gui/$(id -u)/com.openoutposts.worker
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openoutposts.worker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USERNAME/.local/bin/openoutpost</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    Restart on every exit. The worker's own reconnect loop handles a missing
+    control plane; this covers the cases it cannot — a panic, a kill, a
+    reboot — and a machine that silently leaves the fleet is the failure
+    being designed out. It also covers exit code 3, which the worker uses to
+    ask to be started again on a binary it just installed (normally it
+    re-executes itself in place and launchd sees no exit at all). launchctl
+    bootout still stops it for good.
+  -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/openoutpost-worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/openoutpost-worker.err.log</string>
+</dict>
+</plist>

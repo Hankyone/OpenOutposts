@@ -1,0 +1,36 @@
+{
+  "name": "@openoutposts/homestead",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "openoutposts-demo": "dist/demo.js",
+    "openoutposts-homestead": "dist/homestead-main.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.0",
+    "@openoutposts/outpost-protocol": "*",
+    "typebox": "1.1.38",
+    "zod": "^4.1.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0"
+  }
+}

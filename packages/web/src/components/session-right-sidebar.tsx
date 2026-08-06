@@ -1,0 +1,228 @@
+"use client";
+
+import { useMemo } from "react";
+import { CollapsibleSection } from "./sidebar/collapsible-section";
+import { ParticipantsSection } from "./sidebar/participants-section";
+import { MetadataSection } from "./sidebar/metadata-section";
+import { TasksSection } from "./sidebar/tasks-section";
+import { FilesChangedSection } from "./sidebar/files-changed-section";
+import { MediaSection } from "./sidebar/media-section";
+import { ChildSessionsSection } from "./sidebar/child-sessions-section";
+import { extractLatestTasks } from "@/lib/tasks";
+import type { Artifact, SandboxEvent } from "@/types/session";
+import type {
+  ParticipantPresence,
+  SessionDiffFile,
+  SessionDiffRepository,
+  SessionDiffState,
+  SessionState,
+} from "@open-inspect/shared";
+import type { DiffSelection } from "@/lib/session-diffs";
+import type { SessionExecutionTarget } from "@/lib/session-execution-target";
+import { deriveSessionDiffView } from "@/lib/session-diffs";
+import { DiffRetryNotice } from "@/components/diff-retry-notice";
+
+interface SessionRightSidebarProps {
+  sessionId: string;
+  sessionState: SessionState | null;
+  /** Machine (or sandbox) this session executes on; derived by the page. */
+  executionTarget: SessionExecutionTarget;
+  participants: ParticipantPresence[];
+  events: SandboxEvent[];
+  artifacts: Artifact[];
+  onOpenMedia: (artifactId: string) => void;
+  diffState?: SessionDiffState | null;
+  diffLoading?: boolean;
+  selectedDiff?: DiffSelection | null;
+  onOpenDiff?: (repository: SessionDiffRepository, file: SessionDiffFile) => void;
+}
+
+export type SessionRightSidebarContentProps = SessionRightSidebarProps;
+
+export function SessionRightSidebarContent({
+  sessionId,
+  sessionState,
+  executionTarget,
+  participants,
+  events,
+  artifacts,
+  onOpenMedia,
+  diffState,
+  diffLoading,
+  selectedDiff,
+  onOpenDiff,
+}: SessionRightSidebarContentProps) {
+  const tasks = useMemo(() => extractLatestTasks(events), [events]);
+  const warnings = useMemo(
+    () =>
+      events.filter(
+        (event): event is Extract<SandboxEvent, { type: "warning" }> => event.type === "warning"
+      ),
+    [events]
+  );
+  const mediaArtifacts = useMemo(
+    () =>
+      artifacts.filter((artifact) => artifact.type === "screenshot" || artifact.type === "video"),
+    [artifacts]
+  );
+  const hasRepository = Boolean(
+    sessionState?.repositories?.length || (sessionState?.repoOwner && sessionState.repoName)
+  );
+  const diffView = deriveSessionDiffView({
+    hasRepository,
+    isProcessing: sessionState?.isProcessing ?? false,
+    state: diffState ?? null,
+    isLoading: diffLoading ?? false,
+  });
+
+  if (!sessionState) {
+    return (
+      <div className="p-4">
+        <div className="animate-pulse space-y-4">
+          <div className="h-4 bg-muted w-3/4 rounded" />
+          <div className="h-4 bg-muted w-1/2 rounded" />
+          <div className="h-4 bg-muted w-2/3 rounded" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* Participants */}
+      <div className="px-4 py-4 border-b border-border-muted">
+        <ParticipantsSection participants={participants} />
+      </div>
+
+      {/* Metadata */}
+      <div className="px-4 py-4 border-b border-border-muted">
+        <MetadataSection
+          sessionId={sessionId}
+          createdAt={sessionState.createdAt}
+          model={sessionState.model}
+          reasoningEffort={sessionState.reasoningEffort}
+          executionTarget={executionTarget}
+          baseBranch={sessionState.baseBranch}
+          branchName={sessionState.branchName || undefined}
+          repoOwner={sessionState.repoOwner}
+          repoName={sessionState.repoName}
+          artifacts={artifacts}
+          repositories={sessionState.repositories}
+          environmentId={sessionState.environmentId}
+          environmentName={sessionState.environmentName}
+          warnings={warnings}
+          parentSessionId={sessionState.parentSessionId}
+          totalCost={sessionState.totalCost}
+        />
+      </div>
+
+      {/* Tasks */}
+      {tasks.length > 0 && (
+        <CollapsibleSection title="Tasks" defaultOpen={true}>
+          <TasksSection tasks={tasks} />
+        </CollapsibleSection>
+      )}
+
+      {/* Child Sessions */}
+      <ChildSessionsSection sessionId={sessionState.id} />
+
+      {/* Canonical durable checkout changes */}
+      {diffView.kind !== "hidden" && (
+        <CollapsibleSection title="Changes" defaultOpen={true}>
+          {diffView.showManifest && diffState?.current && onOpenDiff && (
+            <FilesChangedSection
+              repositories={diffState.current.repositories}
+              selected={selectedDiff}
+              onSelect={onOpenDiff}
+            />
+          )}
+          <div role="status" aria-live="polite" className={diffView.showManifest ? "mt-2" : ""}>
+            {diffView.kind === "loading" && (
+              <p className="text-xs text-muted-foreground">Loading changes…</p>
+            )}
+            {diffView.kind === "error" && (
+              <p className="text-xs text-destructive">Unable to load changes.</p>
+            )}
+            {diffView.kind === "unavailable" && (
+              <p className="text-xs text-muted-foreground">{diffView.message}</p>
+            )}
+            {diffView.kind === "available_after_execution" && (
+              <p className="text-xs text-muted-foreground">
+                Changes will be available after the first execution.
+              </p>
+            )}
+            {diffView.kind === "working" && (
+              <p className="text-xs text-muted-foreground">
+                {diffView.showManifest
+                  ? "Agent working — showing the previous changes."
+                  : "Changes will be available after this execution."}
+              </p>
+            )}
+            {diffView.kind === "empty" && (
+              <p className="text-xs text-muted-foreground">No file changes in the latest diff.</p>
+            )}
+            {diffView.kind === "failed" && (
+              <DiffRetryNotice
+                sessionId={sessionId}
+                message={diffView.message ?? ""}
+                variant="inline"
+              />
+            )}
+          </div>
+        </CollapsibleSection>
+      )}
+
+      {/* Media */}
+      {mediaArtifacts.length > 0 && (
+        <CollapsibleSection title={`Media (${mediaArtifacts.length})`} defaultOpen={true}>
+          <MediaSection
+            sessionId={sessionId}
+            mediaArtifacts={mediaArtifacts}
+            onOpenMedia={onOpenMedia}
+          />
+        </CollapsibleSection>
+      )}
+
+      {/* Artifacts info when no specific sections are populated */}
+      {tasks.length === 0 && artifacts.length === 0 && (
+        <div className="px-4 py-4">
+          <p className="text-sm text-muted-foreground">
+            Tasks and artifacts will appear here as the agent works.
+          </p>
+        </div>
+      )}
+    </>
+  );
+}
+
+export function SessionRightSidebar({
+  sessionId,
+  sessionState,
+  executionTarget,
+  participants,
+  events,
+  artifacts,
+  onOpenMedia,
+  diffState,
+  diffLoading,
+  selectedDiff,
+  onOpenDiff,
+}: SessionRightSidebarProps) {
+  return (
+    <aside className="w-80 border-l border-border-muted overflow-y-auto hidden lg:block">
+      <SessionRightSidebarContent
+        sessionId={sessionId}
+        sessionState={sessionState}
+        executionTarget={executionTarget}
+        participants={participants}
+        events={events}
+        artifacts={artifacts}
+        onOpenMedia={onOpenMedia}
+        diffState={diffState}
+        diffLoading={diffLoading}
+        selectedDiff={selectedDiff}
+        onOpenDiff={onOpenDiff}
+      />
+    </aside>
+  );
+}

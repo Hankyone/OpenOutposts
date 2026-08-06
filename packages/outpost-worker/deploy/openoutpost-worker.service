@@ -1,0 +1,68 @@
+# OpenOutposts worker — systemd unit.
+#
+# The worker is the thin execution endpoint on a machine the user owns. It
+# connects outbound, so nothing here opens a port. Its Run loop already
+# retries a lost control plane forever with backoff to a 30-second ceiling;
+# what it has never had is anything to restart it after a crash, a panic, a
+# closed terminal, or a reboot.
+#
+# The binary lives in a directory the service account owns, not in
+# /usr/local/bin. The worker updates itself in place — it downloads a signed
+# release, replaces its own binary, and re-executes — and it can only do that
+# where it may write. A root-owned install directory disables self-update and
+# leaves the machine on whatever build it was installed with.
+#
+# Install:
+#   sudo install -d -m 0755 -o openoutposts -g openoutposts /opt/openoutposts/bin
+#   sudo install -m 0755 -o openoutposts -g openoutposts \
+#     openoutpost /opt/openoutposts/bin/openoutpost
+#   sudo install -m 0644 openoutpost-worker.service /etc/systemd/system/
+#   sudo install -d -m 0750 -o openoutposts -g openoutposts /etc/openoutposts
+#   sudo install -m 0600 -o openoutposts -g openoutposts \
+#     worker.env.example /etc/openoutposts/worker.env
+#   sudo -u openoutposts -H /opt/openoutposts/bin/openoutpost enroll ... # paste dashboard command
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now openoutpost-worker
+#
+# Set User to the account whose files and git credentials the agent should act
+# with. Full shell access within that account is the point of the product; the
+# boundary you control is the account and the workspace roots.
+
+[Unit]
+Description=OpenOutposts worker
+Documentation=https://github.com/Hankyone/OpenOutposts/blob/main/docs/OUTPOSTS_QUICKSTART.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=openoutposts
+Group=openoutposts
+# Optional identity-directory and control-plane URL overrides. The machine's
+# enrolled identity holds its normal settings and credential.
+EnvironmentFile=/etc/openoutposts/worker.env
+ExecStart=/opt/openoutposts/bin/openoutpost
+
+Restart=always
+RestartSec=5s
+# Exit 2 is the worker's configuration-validation failure. Retrying it cannot
+# help and would hide the message; every other exit is worth restarting.
+#
+# Exit 3 is the opposite: the worker has installed a new binary and wants to
+# be started again on it. It normally re-executes itself in place and systemd
+# never sees an exit at all, so 3 is the fallback for platforms where that is
+# unavailable. Restart=always already covers it — do not add it here.
+RestartPreventExitStatus=2
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openoutpost
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

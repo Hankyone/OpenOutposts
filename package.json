@@ -1,0 +1,78 @@
+{
+  "name": "openoutposts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/control-plane",
+    "packages/github-bot",
+    "packages/homestead",
+    "packages/linear-bot",
+    "packages/outpost-protocol",
+    "packages/outpost-worker",
+    "packages/shared",
+    "packages/slack-bot",
+    "packages/web"
+  ],
+  "scripts": {
+    "prelint": "npm run build -w @open-inspect/shared && npm run build -w @openoutposts/outpost-protocol",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "pretest": "npm run build -w @open-inspect/shared && npm run build -w @openoutposts/outpost-protocol",
+    "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspaces --if-present",
+    "test:integration": "npm run test:integration --workspaces --if-present",
+    "db:migrate:local": "bash scripts/d1-migrate.sh --local openoutposts-test",
+    "pretypecheck": "npm run build -w @open-inspect/shared && npm run build -w @openoutposts/outpost-protocol",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "prebuild": "npm run build -w @open-inspect/shared && npm run build -w @openoutposts/outpost-protocol",
+    "build": "npm run build --workspaces --if-present",
+    "build:foundation": "npm run build -w @openoutposts/outpost-protocol && npm run build -w @openoutposts/homestead && npm run build -w @openoutposts/outpost-worker",
+    "test:foundation": "npm test -w @openoutposts/outpost-protocol && npm test -w @openoutposts/homestead && npm test -w @openoutposts/outpost-worker",
+    "prepare": "node -e \"if (process.env.CI) process.exit(0)\" && husky"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^22.10.5",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-react": "^7.37.4",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "globals": "^15.14.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.21.0",
+    "undici": "^7.29.0",
+    "wrangler": "^4.119.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "miniflare": {
+      "undici": "$undici"
+    },
+    "minimatch": "^10.2.5"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{js,jsx,json,md,yaml,yml,css}": [
+      "prettier --write"
+    ],
+    "packages/shared/test-fixtures/generators/**/*.py": [
+      "ruff check --fix",
+      "ruff format"
+    ],
+    "*.tf": [
+      "bash scripts/tf-fmt.sh"
+    ]
+  }
+}

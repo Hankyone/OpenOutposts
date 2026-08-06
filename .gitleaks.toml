@@ -1,0 +1,31 @@
+title = "OpenOutposts secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic cryptographic fixtures and parser literals used by tests"
+paths = [
+  '''packages/control-plane/src/auth/crypto\.test\.ts''',
+  '''packages/control-plane/src/auth/github-app\.test\.ts''',
+  '''packages/control-plane/src/auth/sshsig-interoperability\.test\.ts''',
+  '''packages/control-plane/src/session/participant-service\.test\.ts''',
+  '''packages/control-plane/test/integration/commit-signing\.test\.ts''',
+  '''packages/control-plane/test/integration/openssh-ed25519\.test\.ts''',
+  '''packages/shared/test-fixtures/generators/generate_service_auth_vectors\.py''',
+  '''packages/shared/test-fixtures/service-auth-vectors\.json''',
+]
+
+[[allowlists]]
+description = "Source code that parses PEM markers rather than containing a credential"
+paths = [
+  '''packages/control-plane/src/auth/github-app\.ts''',
+  '''packages/github-bot/src/github-auth\.ts''',
+]
+
+[[allowlists]]
+description = "Synthetic authorization values used to assert audit redaction"
+paths = [
+  '''packages/control-plane/src/db/audit-log\.test\.ts''',
+  '''packages/control-plane/test/integration/audit-log\.test\.ts''',
+]

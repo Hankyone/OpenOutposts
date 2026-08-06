@@ -1,0 +1,65 @@
+# OpenOutposts central homestead — systemd unit.
+#
+# The homestead is central hosted infrastructure: it holds the deployment's
+# internal secret and the model credentials, and every file and shell
+# operation it performs happens on an outpost, never here.
+#
+# Install:
+#   sudo install -m 0644 openoutposts-homestead.service /etc/systemd/system/
+#   sudo install -d -m 0750 -o openoutposts -g openoutposts /etc/openoutposts
+#   sudo install -m 0600 -o openoutposts -g openoutposts \
+#     homestead.env.example /etc/openoutposts/homestead.env   # then fill it in
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now openoutposts-homestead
+#
+# Adjust User, WorkingDirectory and ExecStart to match where the repository is
+# deployed. The unit assumes a dedicated service account whose home directory
+# holds the central harness's own credentials.
+
+[Unit]
+Description=OpenOutposts central homestead
+Documentation=https://github.com/Hankyone/OpenOutposts/blob/main/docs/OUTPOSTS_QUICKSTART.md
+After=network-online.target
+Wants=network-online.target
+# A homestead that cannot start stops flapping after five attempts in a minute
+# and enters failed state, where an operator can actually see it.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=openoutposts
+Group=openoutposts
+WorkingDirectory=/opt/openoutposts
+# OPENOUTPOSTS_CONTROL_PLANE_URL, OPENOUTPOSTS_INTERNAL_SECRET and any
+# optional settings. Keep it 0600: the internal secret mints service tokens.
+EnvironmentFile=/etc/openoutposts/homestead.env
+# Session state that lets the homestead re-adopt live sessions after a restart.
+StateDirectory=openoutposts-homestead
+Environment=OPENOUTPOSTS_STATE_DIR=/var/lib/openoutposts-homestead/sessions
+ExecStart=/usr/bin/node /opt/openoutposts/packages/homestead/dist/homestead-main.js
+
+# The homestead exits 0 only when it was asked to stop. Every other exit — a
+# crash, an unhandled rejection, a lost control plane it could not recover
+# from — is a failure, and an unrequested exit 0 is itself the bug this unit
+# exists to survive. "always" therefore does not depend on the process
+# getting its exit code right; systemctl stop still stops it.
+Restart=always
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openoutposts-homestead
+
+NoNewPrivileges=true
+PrivateTmp=true
+# "full" rather than "strict": the central harness reads its provider
+# credentials from the service account's home directory.
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelTunables=true
+
+[Install]
+WantedBy=multi-user.target

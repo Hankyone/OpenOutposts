@@ -1,0 +1,98 @@
+packages/control-plane/src/auth/github-app.test.ts	"open-inspect" },
+packages/control-plane/src/auth/github-app.test.ts	"open-inspect",
+packages/control-plane/src/auth/github-app.test.ts	"open-inspect", "background-agents",
+packages/control-plane/src/auth/github-app.test.ts	"open-inspect/background-agents",
+packages/control-plane/src/auth/sshsig-interoperability.test.ts	"open-inspect@example.com",
+packages/control-plane/src/auth/sshsig-interoperability.test.ts	`open-inspect@example.com ${result.pu
+packages/control-plane/src/sandbox/opencomputer-rest-client.ts	OpenInspect runtime */
+packages/control-plane/src/session/create-session-input.test.ts	"open-inspect" }));
+packages/control-plane/src/session/create-session-input.test.ts	"open-inspect",
+packages/control-plane/src/session/create-session-input.test.ts	"open-inspect", repoName: "background
+packages/control-plane/test/integration/commit-signing.test.ts	"Open Inspect",
+packages/control-plane/test/integration/commit-signing.test.ts	"open-inspect@example.com",
+packages/github-bot/src/index.ts	"open-inspect-github-bot" }));
+packages/github-bot/src/types.ts	"open-inspect-bot[bot]"). */
+packages/github-bot/test/payload-schemas.test.ts	"open-inspect" }, name: "background-a
+packages/github-bot/test/payload-schemas.test.ts	"open-inspect");
+packages/github-bot/test/payload-schemas.test.ts	@open-inspect-bot please check this",
+packages/github-bot/test/webhook.test.ts	"open-inspect-github-bot",
+packages/linear-bot/src/index.ts	"open-inspect-linear-bot" });
+packages/linear-bot/wrangler.toml	"open-inspect-control-plane"
+packages/linear-bot/wrangler.toml	"open-inspect-linear-bot"
+packages/linear-bot/wrangler.toml	/open-inspect-control-plane.YOUR-SUBD
+packages/linear-bot/wrangler.toml	/open-inspect-dev.vercel.app"
+packages/linear-bot/wrangler.toml	/open-inspect-linear-bot.YOUR-SUBDOMA
+packages/shared/src/triggers/slack/normalizer.test.ts	|open-inspect> please deploy" },
+packages/shared/src/triggers/slack/normalizer.test.ts	|open-inspect>" }, "UBOT")).toBeNull(
+packages/shared/src/types/boundary-schemas.test.ts	"open-inspect",
+packages/shared/src/types/commit-signing.test.ts	"Open Inspect",
+packages/shared/src/types/commit-signing.test.ts	"open-inspect@example.com",
+packages/shared/src/types/github-identity.test.ts	"open-inspect-bot", "a", "a1"])("acce
+packages/shared/src/types/session-diffs.test.ts	"open-inspect",
+packages/slack-bot/src/classifier/repos.test.ts	"Open-Inspect",
+packages/slack-bot/src/classifier/repos.test.ts	"Open-Inspect/Background-Agents",
+packages/slack-bot/src/classifier/repos.test.ts	"open-inspect",
+packages/slack-bot/src/classifier/repos.test.ts	"open-inspect/background-agents",
+packages/slack-bot/src/completion/blocks.test.ts	.open-inspect%2Fsession-123"
+packages/slack-bot/src/completion/blocks.test.ts	.open-inspect%2Fsession-123",
+packages/slack-bot/src/completion/blocks.test.ts	.openinspect.dev"
+packages/slack-bot/src/completion/extractor.test.ts	.open-inspect%2Fsession-123",
+packages/slack-bot/src/interaction-payload.test.ts	"open-inspect/background-agents" },
+packages/slack-bot/src/routes/health.ts	"open-inspect-slack-bot", repoCount }
+packages/web/.env.example	/open-inspect-control-plane.YOUR-ACCO
+packages/web/public/branding/logo.svg	>Open Inspect logo mark</title>
+packages/web/src/app/(app)/analytics/page.test.tsx	"open-inspect/background-agents",
+packages/web/src/app/(app)/page.test.tsx	"open-inspect",
+packages/web/src/app/(app)/page.test.tsx	"open-inspect", repoName: "background
+packages/web/src/app/(app)/page.test.tsx	"open-inspect", repoName: "docs" },
+packages/web/src/app/(app)/page.test.tsx	"open-inspect/background-agents",
+packages/web/src/app/(app)/page.test.tsx	"open-inspect/docs");
+packages/web/src/app/(app)/page.test.tsx	"open-inspect/docs",
+packages/web/src/app/(app)/page.test.tsx	/open-inspect\/docs/i }));
+packages/web/src/app/api/auth/oi-refresh/route.test.ts	/open-inspect.example");
+packages/web/src/app/api/commit-signing/route.test.ts	"Open Inspect",
+packages/web/src/app/api/commit-signing/route.test.ts	"open-inspect@example.com",
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect", "background-agents"),
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect", "control-plane", "dev
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect", repoName: "background
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect", repoName: "control-pl
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect/background-agents" }));
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect/background-agents"));
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect/background-agents").len
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect/control-plane" }));
+packages/web/src/components/automations/automation-form.test.tsx	"open-inspect/control-plane"));
+packages/web/src/components/automations/automation-target-selection.test.ts	"open-inspect/background-agents")], r
+packages/web/src/components/automations/automation-target-selection.test.ts	"open-inspect/background-agents")];
+packages/web/src/components/automations/automation-target-selection.test.ts	"open-inspect/background-agents", def
+packages/web/src/components/session-sidebar.test.tsx	"open-inspect",
+packages/web/src/components/settings/data-controls-settings.test.tsx	"open-inspect",
+packages/web/src/components/settings/integrations/commit-signing-settings.test.tsx	"Open Inspect");
+packages/web/src/components/settings/integrations/commit-signing-settings.test.tsx	"Open Inspect",
+packages/web/src/components/settings/integrations/commit-signing-settings.test.tsx	"open-inspect@example.com");
+packages/web/src/components/settings/integrations/commit-signing-settings.test.tsx	"open-inspect@example.com",
+packages/web/src/components/web-session-gate.integration.test.tsx	/open-inspect.example");
+packages/web/src/lib/control-plane-query.test.ts	=open-inspect&trace=1");
+packages/web/src/lib/oi-session.test.ts	/open-inspect.example");
+packages/web/src/lib/session-cookie.test.ts	/open-inspect.example");
+packages/web/src/lib/session-list.test.ts	"open-inspect",
+packages/web/src/lib/session-list.test.ts	"open-inspect/background-agents");
+packages/web/wrangler.toml	"open-inspect-control-plane-local"
+packages/web/wrangler.toml	"open-inspect-web-local"
+packages/web/wrangler.toml	open-inspect-web-<deployment_name>
+scripts/cf-logs.ts	Open-Inspect control plane.
+scripts/cf-logs.ts	open-inspect-control-plane`);
+scripts/mirror.sh	.openinspect
+terraform/d1/migrations/0041_session_pull_requests.sql	Open-Inspect sessions (design: 2026-
+terraform/environments/production/backend.tf	Open-Inspect and provisions the same
+terraform/environments/production/backend.tf	Open-Inspect's state bucket. This re
+terraform/environments/production/locals.tf	Open-Inspect deployment in the same
+terraform/environments/production/main.tf	Open-Inspect - Production Environmen
+terraform/environments/production/terraform.tfvars.example	"Open Inspect"     -> slug "open-insp
+terraform/environments/production/terraform.tfvars.example	"Open-Inspect"
+terraform/environments/production/terraform.tfvars.example	"Open-Inspect".
+terraform/environments/production/terraform.tfvars.example	"open-inspect"     -> "open-inspect[b
+terraform/environments/production/terraform.tfvars.example	"open-inspect-media-<deployment_name>
+terraform/environments/production/terraform.tfvars.example	"open-inspect[bot]"
+terraform/environments/production/terraform.tfvars.example	/open-inspect-{deployment_name}.verce
+terraform/environments/production/terraform.tfvars.example	Open-Inspect - Production Terraform
+terraform/environments/production/variables.tf	OpenInspect snapshots and stops the

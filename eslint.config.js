@@ -1,0 +1,257 @@
+import js from "@eslint/js";
+import tseslint from "typescript-eslint";
+import reactPlugin from "eslint-plugin-react";
+import reactHooksPlugin from "eslint-plugin-react-hooks";
+import eslintConfigPrettier from "eslint-config-prettier";
+import globals from "globals";
+
+export default tseslint.config(
+  // Global ignores
+  {
+    ignores: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/.next/**",
+      "**/build/**",
+      "**/.wrangler/**",
+      "**/coverage/**",
+      "**/.venv/**",
+      "**/venv/**",
+      "**/*.d.ts",
+      // Third-party browser bundle checked into the standalone landing package
+      "packages/landing/public/assets/vendor/**",
+    ],
+  },
+
+  // Base JS/TS config for all TypeScript files
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+
+  // TypeScript files configuration
+  {
+    files: ["packages/**/*.{ts,tsx}"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        ...globals.node,
+        ...globals.es2022,
+      },
+      parserOptions: {
+        ecmaFeatures: {
+          jsx: true,
+        },
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+      "@typescript-eslint/no-explicit-any": "warn",
+      "@typescript-eslint/consistent-type-imports": [
+        "error",
+        { prefer: "type-imports", fixStyle: "separate-type-imports" },
+      ],
+      // Allow console in backend/server code - disable per-file if needed
+      "no-console": "off",
+    },
+  },
+
+  // Standalone landing page browser assets
+  {
+    files: ["packages/landing/public/assets/*.js"],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+      },
+    },
+  },
+
+  // Landing page Cloudflare Worker
+  {
+    files: ["packages/landing/src/**/*.js"],
+    languageOptions: {
+      globals: {
+        ...globals.worker,
+        console: "readonly",
+      },
+    },
+  },
+
+  // Landing page asset-generation scripts
+  {
+    files: ["packages/landing/tools/**/*.{js,mjs}"],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+
+  // Repo-level maintenance scripts run under Node directly.
+  {
+    files: ["scripts/**/*.{js,mjs}"],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+
+  // Control-plane data-layer boundary: all production code must use the
+  // injected SqlDatabase (ctx.db, a DO's db field, or a db parameter), never
+  // the raw env.DB binding — reading the binding elsewhere would silently
+  // bypass the injection path and, on request paths, query instrumentation.
+  // The only legitimate reads are the composition roots (router.ts and the
+  // two Durable Object constructors), each carrying an inline
+  // eslint-disable with justification.
+  {
+    files: ["packages/control-plane/src/**/*.ts"],
+    ignores: ["packages/control-plane/src/**/*.test.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: 'MemberExpression[property.name="DB"]',
+          message:
+            "Use the injected SqlDatabase (ctx.db / this.db / a db param) instead of env.DB; the binding is read only at composition roots.",
+        },
+      ],
+    },
+  },
+
+  // React-specific configuration for web package
+  {
+    files: ["packages/web/**/*.{ts,tsx}"],
+    plugins: {
+      react: reactPlugin,
+      "react-hooks": reactHooksPlugin,
+    },
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        React: "readonly",
+      },
+    },
+    settings: {
+      react: {
+        version: "detect",
+      },
+    },
+    rules: {
+      ...reactPlugin.configs.recommended.rules,
+      ...reactHooksPlugin.configs.recommended.rules,
+      "react/react-in-jsx-scope": "off",
+      "react/prop-types": "off",
+    },
+  },
+
+  // Web BFF routes depend on the server-auth seam, not directly on the
+  // current authentication framework. The auth endpoints own the framework
+  // integration and are intentionally excluded.
+  {
+    files: [
+      "packages/web/src/app/api/**/*.{ts,tsx}",
+      "packages/web/src/lib/integration-settings-proxy.ts",
+    ],
+    ignores: ["packages/web/src/app/api/auth/**"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "next-auth",
+              message: "Use getServerAuthSession from @/lib/server-auth-session.",
+            },
+          ],
+          patterns: [
+            {
+              regex: "(?:^|/)lib/auth$",
+              message: "Use getServerAuthSession from @/lib/server-auth-session.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+
+  // Web code depends on app-owned auth and request seams so the terminal
+  // browser-auth implementation can replace NextAuth and add its request
+  // contract without another consumer migration.
+  {
+    files: ["packages/web/src/**/*.{ts,tsx}"],
+    ignores: [
+      "packages/web/src/app/api/**",
+      "packages/web/src/lib/auth-session.tsx",
+      "packages/web/src/lib/auth-session.test.tsx",
+    ],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "next-auth/react",
+              message: "Use the app-owned boundary from @/lib/auth-session.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ["packages/web/src/**/*.{ts,tsx}"],
+    ignores: [
+      "**/*.test.{ts,tsx}",
+      "**/*.spec.{ts,tsx}",
+      "packages/web/src/lib/auth.ts",
+      "packages/web/src/lib/browser-api-fetch.ts",
+      "packages/web/src/lib/control-plane-transport.ts",
+      "packages/web/src/lib/github-org-membership.ts",
+    ],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        {
+          name: "fetch",
+          message: "Use an app-owned HTTP transport instead of raw fetch.",
+        },
+      ],
+    },
+  },
+
+  // Cloudflare Workers specific config
+  {
+    files: ["packages/control-plane/**/*.ts"],
+    languageOptions: {
+      globals: {
+        ...globals.worker,
+        WebSocketPair: "readonly",
+        DurableObjectState: "readonly",
+        DurableObjectStorage: "readonly",
+        DurableObjectId: "readonly",
+        DurableObjectNamespace: "readonly",
+        ExecutionContext: "readonly",
+        ScheduledEvent: "readonly",
+      },
+    },
+  },
+
+  // Test files configuration
+  {
+    files: ["**/*.test.{ts,tsx}", "**/*.spec.{ts,tsx}"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+      "no-console": "off",
+    },
+  },
+
+  // Disable rules that conflict with Prettier
+  eslintConfigPrettier
+);

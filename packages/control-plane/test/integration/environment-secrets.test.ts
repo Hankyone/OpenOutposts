@@ -1,0 +1,133 @@
+/**
+ * EnvironmentSecretsStore: per-environment CRUD parity with repo secrets, and
+ * the per-key import from a member repo, which re-seals each value from the
+ * repo's scope into the environment's.
+ *
+ * The import used to copy ciphertext verbatim — both scopes share one
+ * encryption key, so it worked and kept plaintext out of the control plane.
+ * Values are now bound to the scope that stores them, so a verbatim copy would
+ * land a row nothing can read. The test below asserts the new behaviour, and
+ * asserts the source ciphertext genuinely does not decrypt in the destination
+ * scope, which is the property the binding exists for.
+ */
+
+import { describe, it, expect, beforeEach } from "vitest";
+import { env } from "cloudflare:test";
+import { EnvironmentSecretsStore } from "../../src/db/environment-secrets";
+import { RepoSecretsStore } from "../../src/db/repo-secrets";
+import { decryptToken } from "../../src/auth/crypto";
+import {
+  environmentSecretScope,
+  repoSecretScope,
+  scopedSecretContext,
+} from "../../src/auth/encryption-contexts";
+import { cleanD1Tables } from "./cleanup";
+
+const key = () => env.REPO_SECRETS_ENCRYPTION_KEY!;
+const ENV_ID = "env_secrets_test";
+
+/** Insert a parent environments row so the FK-backed secret writes are valid. */
+async function seedEnv(id: string): Promise<void> {
+  const now = Date.now();
+  await env.DB.prepare(
+    "INSERT INTO environments (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)"
+  )
+    .bind(id, id, now, now)
+    .run();
+}
+
+describe("EnvironmentSecretsStore", () => {
+  beforeEach(cleanD1Tables);
+  beforeEach(() => seedEnv(ENV_ID));
+
+  it("sets, lists, decrypts, and deletes environment secrets", async () => {
+    const store = new EnvironmentSecretsStore(env.DB, key());
+    const res = await store.setSecrets(ENV_ID, { API_URL: "https://x", TOKEN: "abc" });
+    expect(res.created).toBe(2);
+    expect(res.keys.sort()).toEqual(["API_URL", "TOKEN"]);
+
+    expect((await store.listSecretKeys(ENV_ID)).map((k) => k.key)).toEqual(["API_URL", "TOKEN"]);
+    expect(await store.getDecryptedSecrets(ENV_ID)).toEqual({ API_URL: "https://x", TOKEN: "abc" });
+
+    expect(await store.deleteSecret(ENV_ID, "TOKEN")).toBe(true);
+    expect((await store.listSecretKeys(ENV_ID)).map((k) => k.key)).toEqual(["API_URL"]);
+  });
+
+  it("scopes secrets per environment", async () => {
+    const store = new EnvironmentSecretsStore(env.DB, key());
+    await seedEnv("env_a");
+    await seedEnv("env_b");
+    await store.setSecrets("env_a", { A: "1" });
+    await store.setSecrets("env_b", { B: "2" });
+    expect(Object.keys(await store.getDecryptedSecrets("env_a"))).toEqual(["A"]);
+    expect(Object.keys(await store.getDecryptedSecrets("env_b"))).toEqual(["B"]);
+  });
+
+  it("imports selected repo secrets, re-sealed into the environment's scope", async () => {
+    const repoStore = new RepoSecretsStore(env.DB, key());
+    await repoStore.setSecrets(42, "acme", "web", { DB_URL: "postgres://secret", ONLY_ONE: "x" });
+
+    const src = await env.DB.prepare(
+      "SELECT key, encrypted_value FROM repo_secrets WHERE repo_id = 42"
+    ).all<{ key: string; encrypted_value: string }>();
+    const srcCipher = new Map((src.results ?? []).map((r) => [r.key, r.encrypted_value]));
+
+    const envStore = new EnvironmentSecretsStore(env.DB, key());
+    const result = await envStore.importFromRepo(ENV_ID, 42, ["DB_URL"]);
+    expect(result.created).toBe(1);
+    expect(result.keys).toEqual(["DB_URL"]);
+
+    const copied = await env.DB.prepare(
+      "SELECT encrypted_value FROM environment_secrets WHERE environment_id = ? AND key = 'DB_URL'"
+    )
+      .bind(ENV_ID)
+      .first<{ encrypted_value: string }>();
+
+    // Not the source bytes: the value was re-sealed for this environment.
+    expect(copied?.encrypted_value).not.toBe(srcCipher.get("DB_URL"));
+    // It reads as the original plaintext under the environment's own scope.
+    expect(
+      await decryptToken(
+        copied!.encrypted_value,
+        key(),
+        scopedSecretContext(environmentSecretScope(ENV_ID), "DB_URL")
+      )
+    ).toBe("postgres://secret");
+    expect(await envStore.getDecryptedSecrets(ENV_ID)).toEqual({ DB_URL: "postgres://secret" });
+
+    // And the reason a verbatim copy is no longer possible: the repo's own
+    // ciphertext does not authenticate in the environment's scope.
+    await expect(
+      decryptToken(
+        srcCipher.get("DB_URL")!,
+        key(),
+        scopedSecretContext(environmentSecretScope(ENV_ID), "DB_URL")
+      )
+    ).rejects.toThrow();
+    // It still reads in the scope it was written for.
+    expect(
+      await decryptToken(
+        srcCipher.get("DB_URL")!,
+        key(),
+        scopedSecretContext(repoSecretScope(42), "DB_URL")
+      )
+    ).toBe("postgres://secret");
+
+    // Unrequested key was not imported.
+    expect((await envStore.listSecretKeys(ENV_ID)).map((k) => k.key)).toEqual(["DB_URL"]);
+  });
+
+  it("imports all repo keys when none are specified", async () => {
+    const repoStore = new RepoSecretsStore(env.DB, key());
+    await repoStore.setSecrets(7, "acme", "api", { A: "1", B: "2" });
+    const envStore = new EnvironmentSecretsStore(env.DB, key());
+    const result = await envStore.importFromRepo(ENV_ID, 7);
+    expect(result.keys.sort()).toEqual(["A", "B"]);
+  });
+
+  it("no-ops when the source repo has no matching keys", async () => {
+    const envStore = new EnvironmentSecretsStore(env.DB, key());
+    const result = await envStore.importFromRepo(ENV_ID, 999, ["NOPE"]);
+    expect(result).toEqual({ created: 0, updated: 0, keys: [] });
+  });
+});

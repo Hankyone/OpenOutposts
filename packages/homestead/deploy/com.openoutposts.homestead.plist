@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OpenOutposts central homestead — launchd agent for developer machines.
+
+  Production homesteads run under systemd; this exists so a homestead on a Mac
+  survives a control-plane restart, a crash, and a logout the same way.
+
+  Install (replace the placeholder paths and the secret first):
+    cp com.openoutposts.homestead.plist ~/Library/LaunchAgents/
+    chmod 600 ~/Library/LaunchAgents/com.openoutposts.homestead.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openoutposts.homestead.plist
+
+  Stop it with:
+    launchctl bootout gui/$(id -u)/com.openoutposts.homestead
+
+  The internal secret sits in this file in plaintext, which is why the mode
+  above is 0600 and why this is a developer-machine tool, not a production
+  credential store.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openoutposts.homestead</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/opt/openoutposts/packages/homestead/dist/homestead-main.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/opt/openoutposts</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OPENOUTPOSTS_CONTROL_PLANE_URL</key>
+    <string>https://control-plane.example.com</string>
+    <key>OPENOUTPOSTS_INTERNAL_SECRET</key>
+    <string>replace-me</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    Restart on every exit, not only on a non-zero one. The homestead exits 0 only
+    when it was asked to stop, and an unrequested exit 0 is exactly the
+    failure this supervision exists to survive; launchctl bootout still stops
+    it without a restart.
+  -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Floor between restarts, so a misconfigured homestead does not spin. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/openoutposts-homestead.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/openoutposts-homestead.err.log</string>
+</dict>
+</plist>

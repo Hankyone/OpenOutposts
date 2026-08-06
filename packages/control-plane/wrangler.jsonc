@@ -1,0 +1,39 @@
+// Test-only config. Production deployment is managed via Terraform.
+{
+  "name": "openoutposts-control-plane-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-12-30",
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION", "class_name": "SessionDO" },
+      { "name": "SCHEDULER", "class_name": "SchedulerDO" },
+      { "name": "OUTPOST", "class_name": "OutpostDO" },
+      { "name": "HOMESTEAD", "class_name": "HomesteadDO" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SessionDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["SchedulerDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["OutpostDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["RunnerDO"] },
+    { "tag": "v5", "renamed_classes": [{ "from": "RunnerDO", "to": "HomesteadDO" }] },
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_name": "openoutposts-test",
+    },
+  ],
+  "kv_namespaces": [{ "binding": "REPOS_CACHE", "id": "00000000000000000000000000000000" }],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "openoutposts-media-test",
+    },
+    {
+      "binding": "RELEASES_BUCKET",
+      "bucket_name": "openoutposts-releases-test",
+    },
+  ],
+}

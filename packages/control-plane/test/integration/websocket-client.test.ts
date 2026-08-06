@@ -1,0 +1,446 @@
+import { describe, it, expect } from "vitest";
+import { env } from "cloudflare:test";
+import {
+  initNamedSession,
+  openClientWs,
+  collectMessages,
+  seedEvents,
+  seedMessage,
+  queryDO,
+} from "./helpers";
+
+describe("Client WebSocket (via SELF.fetch)", () => {
+  it("upgrade returns 101 with webSocket", async () => {
+    const name = `ws-client-upgrade-${Date.now()}`;
+    await initNamedSession(name);
+
+    const { ws } = await openClientWs(name);
+    expect(ws).not.toBeNull();
+    // Clean up
+    ws.close();
+  });
+
+  it("rejects a prompt sent before subscribing without enqueuing it", async () => {
+    const name = `ws-client-nosub-prompt-${Date.now()}`;
+    await initNamedSession(name);
+
+    const { ws } = await openClientWs(name);
+
+    const closed = new Promise<{ code: number }>((resolve) => {
+      ws.addEventListener("close", (evt) => resolve({ code: evt.code }));
+    });
+
+    ws.send(JSON.stringify({ type: "prompt", content: "hello" }));
+
+    // Unsubscribed sockets have no client mapping — the DO closes them
+    // with 4002 and never enqueues the prompt.
+    const { code } = await closed;
+    expect(code).toBe(4002);
+
+    const id = env.SESSION.idFromName(name);
+    const stub = env.SESSION.get(id);
+    const rows = await queryDO<{ count: number }>(stub, "SELECT COUNT(*) AS count FROM messages");
+    expect(rows[0].count).toBe(0);
+  });
+
+  it("rejects a stop sent before subscribing without halting the running turn", async () => {
+    const name = `ws-client-nosub-stop-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+
+    const participants = await queryDO<{ id: string }>(
+      stub,
+      "SELECT id FROM participants WHERE user_id = 'user-1'"
+    );
+
+    await seedMessage(stub, {
+      id: "msg-running",
+      authorId: participants[0].id,
+      content: "keep going",
+      source: "web",
+      status: "processing",
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+    });
+
+    const { ws } = await openClientWs(name);
+    const closed = new Promise<{ code: number }>((resolve) => {
+      ws.addEventListener("close", (evt) => resolve({ code: evt.code }));
+    });
+
+    ws.send(JSON.stringify({ type: "stop" }));
+
+    const { code } = await closed;
+    expect(code).toBe(4002);
+
+    // The turn must still be running: an unattributed socket cannot end it.
+    const rows = await queryDO<{ status: string }>(
+      stub,
+      "SELECT status FROM messages WHERE id = 'msg-running'"
+    );
+    expect(rows[0].status).toBe("processing");
+  });
+
+  it("rejects a typing signal sent before subscribing", async () => {
+    const name = `ws-client-nosub-typing-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+
+    const { ws } = await openClientWs(name);
+    const closed = new Promise<{ code: number }>((resolve) => {
+      ws.addEventListener("close", (evt) => resolve({ code: evt.code }));
+    });
+
+    ws.send(JSON.stringify({ type: "typing" }));
+
+    const { code } = await closed;
+    expect(code).toBe(4002);
+
+    // Typing wakes a machine, so an unattributed socket must not reach it.
+    const rows = await queryDO<{ count: number }>(
+      stub,
+      "SELECT COUNT(*) AS count FROM sandbox WHERE status = 'spawning'"
+    );
+    expect(rows[0].count).toBe(0);
+  });
+
+  it("subscribe with valid token sends subscribed + state", async () => {
+    const name = `ws-client-sub-${Date.now()}`;
+    await initNamedSession(name, { repoOwner: "acme", repoName: "web-app" });
+
+    const { ws, participantId, messages } = await openClientWs(name, { subscribe: true });
+
+    const subscribed = messages!.find((m) => m.type === "subscribed") as Record<string, unknown>;
+    expect(subscribed).toBeDefined();
+    expect(subscribed.sessionId).toBe(name);
+    expect(subscribed.participantId).toBe(participantId);
+
+    const state = subscribed.state as Record<string, unknown>;
+    expect(state.id).toBe(name);
+    expect(state.repoOwner).toBe("acme");
+
+    ws.close();
+  });
+
+  it("subscribe with invalid token closes socket 4001", async () => {
+    const name = `ws-client-badtoken-${Date.now()}`;
+    await initNamedSession(name);
+
+    const { ws } = await openClientWs(name);
+
+    const closed = new Promise<{ code: number }>((resolve) => {
+      ws.addEventListener("close", (evt) => resolve({ code: evt.code }));
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: "subscribe",
+        token: "totally-invalid-token",
+        clientId: "test-client",
+      })
+    );
+
+    const { code } = await closed;
+    expect(code).toBe(4001);
+  });
+
+  it("subscribe without token closes socket 4001", async () => {
+    const name = `ws-client-notoken-${Date.now()}`;
+    await initNamedSession(name);
+
+    const { ws } = await openClientWs(name);
+
+    const closed = new Promise<{ code: number }>((resolve) => {
+      ws.addEventListener("close", (evt) => resolve({ code: evt.code }));
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: "subscribe",
+        token: "",
+        clientId: "test-client",
+      })
+    );
+
+    const { code } = await closed;
+    expect(code).toBe(4001);
+  });
+
+  it("subscribe with expired token closes socket 4001", async () => {
+    const name = `ws-client-expired-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+
+    // Generate a valid WS token
+    const id = env.SESSION.idFromName(name);
+    const doStub = env.SESSION.get(id);
+    const tokenRes = await doStub.fetch("http://internal/internal/ws-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "user-1" }),
+    });
+    const { token } = await tokenRes.json<{ token: string }>();
+
+    // Back-date the token past the 24-hour TTL
+    const expiredAt = Date.now() - 24 * 60 * 60 * 1000 - 1;
+    await queryDO(
+      stub,
+      "UPDATE participants SET ws_token_created_at = ? WHERE user_id = ?",
+      expiredAt,
+      "user-1"
+    );
+
+    // Open WS and try to subscribe with the expired token
+    const { ws } = await openClientWs(name);
+
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.addEventListener("close", (evt) => resolve({ code: evt.code, reason: evt.reason }));
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: "subscribe",
+        token,
+        clientId: "test-client",
+      })
+    );
+
+    const { code, reason } = await closed;
+    expect(code).toBe(4001);
+    expect(reason).toBe("Token expired");
+  });
+
+  it("subscribe includes batched replay with hasMore=false for empty session", async () => {
+    const name = `ws-client-replay-empty-${Date.now()}`;
+    await initNamedSession(name);
+
+    const { ws, messages } = await openClientWs(name, { subscribe: true });
+
+    const subscribed = messages!.find((m) => m.type === "subscribed") as Record<string, unknown>;
+    expect(subscribed).toBeDefined();
+    expect(subscribed.artifacts).toEqual([]);
+    const replay = subscribed.replay as { events: unknown[]; hasMore: boolean; cursor: unknown };
+    expect(replay).toBeDefined();
+    expect(replay.hasMore).toBe(false);
+    expect(replay.cursor).toBeNull();
+    expect(replay.events).toHaveLength(0);
+
+    ws.close();
+  });
+
+  it("subscribe includes historical events in batched replay", async () => {
+    const name = `ws-client-replay-events-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+
+    const now = Date.now();
+    await seedEvents(stub, [
+      {
+        id: "ev-1",
+        type: "tool_call",
+        data: JSON.stringify({ type: "tool_call", tool: "read_file" }),
+        createdAt: now - 2000,
+      },
+      {
+        id: "ev-2",
+        type: "tool_result",
+        data: JSON.stringify({ type: "tool_result", result: "ok" }),
+        createdAt: now - 1000,
+      },
+    ]);
+
+    const { ws, messages } = await openClientWs(name, { subscribe: true });
+
+    const subscribed = messages!.find((m) => m.type === "subscribed") as Record<string, unknown>;
+    expect(subscribed).toBeDefined();
+    const replay = subscribed.replay as { events: Record<string, unknown>[]; hasMore: boolean };
+    expect(replay).toBeDefined();
+    expect(replay.events).toHaveLength(2);
+    expect(replay.events[0].type).toBe("tool_call");
+    expect(replay.events[1].type).toBe("tool_result");
+
+    ws.close();
+  });
+
+  it("subscribe hydrates persisted PR artifacts with parsed metadata and createdAt", async () => {
+    const name = `ws-client-artifacts-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+    const createdAt = Date.now() - 1000;
+
+    await queryDO(
+      stub,
+      "INSERT INTO artifacts (id, type, url, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      "artifact-pr-1",
+      "pr",
+      "https://github.com/acme/web-app/pull/42",
+      JSON.stringify({
+        number: 42,
+        state: "open",
+        head: "feature/test",
+        base: "main",
+      }),
+      createdAt,
+      createdAt
+    );
+
+    const { ws, messages } = await openClientWs(name, { subscribe: true });
+
+    const subscribed = messages!.find((m) => m.type === "subscribed") as Record<string, unknown>;
+    expect(subscribed).toBeDefined();
+    expect(subscribed.artifacts).toEqual([
+      {
+        id: "artifact-pr-1",
+        type: "pr",
+        url: "https://github.com/acme/web-app/pull/42",
+        metadata: {
+          number: 42,
+          state: "open",
+          head: "feature/test",
+          base: "main",
+        },
+        createdAt,
+        updatedAt: createdAt,
+      },
+    ]);
+
+    ws.close();
+  });
+
+  it("ping gets pong response", async () => {
+    const name = `ws-client-ping-${Date.now()}`;
+    await initNamedSession(name);
+
+    const { ws } = await openClientWs(name);
+
+    const collector = collectMessages(ws, {
+      until: (msg) => msg.type === "pong",
+      timeoutMs: 2000,
+    });
+
+    ws.send(JSON.stringify({ type: "ping" }));
+
+    const messages = await collector;
+    const pong = messages.find((m) => m.type === "pong");
+    expect(pong).toBeDefined();
+    expect(pong!.timestamp).toEqual(expect.any(Number));
+
+    ws.close();
+  });
+
+  it("prompt via WS creates message and returns prompt_queued", async () => {
+    const name = `ws-client-prompt-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+
+    const { ws } = await openClientWs(name, { subscribe: true });
+
+    const collector = collectMessages(ws, {
+      until: (msg) => msg.type === "prompt_queued",
+      timeoutMs: 2000,
+    });
+
+    ws.send(JSON.stringify({ type: "prompt", content: "Hello from WS test" }));
+
+    const messages = await collector;
+    const queued = messages.find((m) => m.type === "prompt_queued") as Record<string, unknown>;
+    expect(queued).toBeDefined();
+    expect(queued.messageId).toEqual(expect.any(String));
+
+    // Verify message exists in DB
+    const rows = await queryDO<{ id: string; content: string; source: string }>(
+      stub,
+      "SELECT id, content, source FROM messages WHERE id = ?",
+      queued.messageId
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toBe("Hello from WS test");
+    expect(rows[0].source).toBe("web");
+
+    ws.close();
+  });
+
+  it("closing one of multiple sockets for the same participant sends presence_update, not presence_leave", async () => {
+    const name = `ws-client-presence-multi-${Date.now()}`;
+    await initNamedSession(name);
+
+    // Two tabs for the same user → same participantId
+    const tab1 = await openClientWs(name, { subscribe: true, userId: "user-1" });
+    const tab2 = await openClientWs(name, { subscribe: true, userId: "user-1" });
+    expect(tab1.participantId).toBe(tab2.participantId);
+
+    const collector = collectMessages(tab1.ws, {
+      until: (msg) => msg.type === "presence_update" || msg.type === "presence_leave",
+      timeoutMs: 2000,
+    });
+
+    tab2.ws.close();
+
+    const messages = await collector;
+    expect(messages.some((m) => m.type === "presence_leave")).toBe(false);
+    const update = messages.find((m) => m.type === "presence_update") as Record<string, unknown>;
+    expect(update).toBeDefined();
+    const participants = update.participants as Array<{ participantId: string }>;
+    expect(participants.some((p) => p.participantId === tab1.participantId)).toBe(true);
+
+    tab1.ws.close();
+  });
+
+  it("closing the only socket for a participant broadcasts presence_leave", async () => {
+    const name = `ws-client-presence-leave-${Date.now()}`;
+    await initNamedSession(name);
+
+    // Two distinct users so the watcher remains connected after the target leaves
+    const watcher = await openClientWs(name, { subscribe: true, userId: "user-1" });
+    const leaver = await openClientWs(name, { subscribe: true, userId: "user-2" });
+
+    const collector = collectMessages(watcher.ws, {
+      until: (msg) => msg.type === "presence_leave",
+      timeoutMs: 2000,
+    });
+
+    leaver.ws.close();
+
+    const messages = await collector;
+    const leave = messages.find((m) => m.type === "presence_leave") as Record<string, unknown>;
+    expect(leave).toBeDefined();
+    expect(leave.userId).toBe("user-2");
+
+    watcher.ws.close();
+  });
+
+  it("sandbox event is broadcast to subscribed client", async () => {
+    const name = `ws-client-broadcast-${Date.now()}`;
+    const { stub } = await initNamedSession(name);
+
+    // Subscribe a client first
+    const { ws } = await openClientWs(name, { subscribe: true });
+
+    // Listen for the broadcast
+    const collector = collectMessages(ws, {
+      until: (msg) =>
+        msg.type === "sandbox_event" &&
+        (msg.event as Record<string, unknown>)?.type === "tool_call",
+      timeoutMs: 2000,
+    });
+
+    // Post sandbox event via DO internal endpoint (simulates sandbox behavior)
+    await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "tool_call",
+        tool: "write_file",
+        args: { path: "/src/index.ts" },
+        callId: "c-broadcast",
+        messageId: "msg-broadcast",
+        sandboxId: "sb-1",
+        timestamp: Date.now() / 1000,
+      }),
+    });
+
+    const messages = await collector;
+    const broadcast = messages.find(
+      (m) =>
+        m.type === "sandbox_event" && (m.event as Record<string, unknown>)?.type === "tool_call"
+    );
+    expect(broadcast).toBeDefined();
+    expect((broadcast!.event as Record<string, unknown>).tool).toBe("write_file");
+
+    ws.close();
+  });
+});
