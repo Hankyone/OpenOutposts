@@ -58,8 +58,8 @@ export default function MachinesPage() {
           <div className="mb-6">
             <h1 className="text-3xl font-semibold text-foreground">Machines</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Every machine that runs your sessions&apos; files and commands. Agents run here in the
-              control plane; only the work touches these.
+              Outposts that run file and shell work for your sessions. The agent lives on a
+              homestead; only leased work touches these machines.
             </p>
           </div>
 

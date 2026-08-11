@@ -23,7 +23,7 @@ const CATEGORY_LABELS: Record<SettingsCategory, string> = {
   appearance: "Appearance",
   "keyboard-shortcuts": "Keyboard",
   "data-controls": "Data Controls",
-  sandbox: "Sandbox",
+  sandbox: "Execution",
   integrations: "Integrations",
   "mcp-servers": "MCP Servers",
 };
@@ -93,7 +93,7 @@ export default function SettingsPage() {
       {activeCategory === "appearance" && <AppearanceSettings />}
       {activeCategory === "keyboard-shortcuts" && <KeyboardShortcutsSettings />}
       {activeCategory === "data-controls" && <DataControlsSettings />}
-      {activeCategory === "sandbox" && <UnavailableSettings title="Sandbox" />}
+      {activeCategory === "sandbox" && <UnavailableSettings title="Execution" />}
       {activeCategory === "integrations" && <IntegrationsSettings />}
       {activeCategory === "mcp-servers" && <UnavailableSettings title="MCP Servers" />}
     </>

@@ -12,6 +12,8 @@ export default tseslint.config(
       "**/node_modules/**",
       "**/dist/**",
       "**/.next/**",
+      // OpenNext Cloudflare adapter output (local web builds)
+      "**/.open-next/**",
       "**/build/**",
       "**/.wrangler/**",
       "**/coverage/**",

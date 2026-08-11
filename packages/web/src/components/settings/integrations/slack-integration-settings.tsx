@@ -133,7 +133,7 @@ export function SlackIntegrationSettings() {
       <h3 className="text-lg font-semibold text-foreground mb-1">Slack</h3>
       <p className="text-sm text-muted-foreground mb-6">
         Let agents post Slack notifications when the user explicitly asks for them. Posts go through
-        the control plane — the Slack token never enters the sandbox.
+        the control plane — the Slack token never reaches an outpost.
       </p>
 
       <Section

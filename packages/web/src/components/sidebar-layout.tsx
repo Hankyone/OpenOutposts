@@ -134,7 +134,7 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
       <div className="min-h-screen flex flex-col items-center justify-center gap-8">
         <h1 className="text-4xl font-bold text-foreground">{APP_NAME}</h1>
         <p className="text-muted-foreground max-w-md text-center">
-          Background coding agent for your team. Ship faster with AI-powered code changes.
+          Central agents on a homestead. Leased work runs on outposts you enroll.
         </p>
         <div className="flex flex-col items-stretch gap-3">
           <Button onClick={() => signIn("github")} className="gap-2 px-6 py-3">

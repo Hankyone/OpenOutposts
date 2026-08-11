@@ -26,7 +26,7 @@ export function SecretsSettings() {
     <div>
       <h2 className="text-xl font-semibold text-foreground mb-1">Secrets</h2>
       <p className="text-sm text-muted-foreground mb-6">
-        Manage environment variables that are injected into sandbox sessions.
+        Manage environment variables for sessions. Not available on the outpost path yet.
       </p>
 
       {/* Repo selector */}

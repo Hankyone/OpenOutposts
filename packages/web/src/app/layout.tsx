@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: APP_NAME,
-  description: "Background coding agent for your team",
+  description: "Run coding agents on machines you control",
   icons: { icon: APP_FAVICON_URL },
 };
 

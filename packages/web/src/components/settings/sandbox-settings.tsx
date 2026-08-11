@@ -548,7 +548,7 @@ export function SandboxSettingsEditor({
           <div>
             <label className="block text-sm font-medium text-foreground">Web Terminal</label>
             <p className="text-xs text-muted-foreground">
-              Enable a browser-based terminal in sandbox sessions.
+              Enable a browser-based terminal in sessions.
             </p>
           </div>
           <button
@@ -628,7 +628,7 @@ export function SandboxSettingsEditor({
           </Button>
         </div>
         <p className="text-xs text-muted-foreground mb-2">
-          Expose additional ports from sandboxes via public tunnel URLs (e.g., dev server ports).
+          Expose additional ports via public tunnel URLs (e.g., dev server ports).
         </p>
         <div className="space-y-2 max-w-sm">
           {rows.length === 0 ? (
@@ -661,7 +661,7 @@ export function SandboxSettingsEditor({
       <div>
         <label className="block text-sm font-medium text-foreground mb-1.5">Child Sessions</label>
         <p className="text-xs text-muted-foreground mb-2">
-          Limit agent-spawned child sessions to prevent runaway sandbox usage.
+          Limit agent-spawned child sessions to prevent runaway usage.
         </p>
         <div className="grid gap-3 max-w-sm sm:grid-cols-2">
           <div>
@@ -702,8 +702,8 @@ export function SandboxSettingsEditor({
       <div>
         <label className="block text-sm font-medium text-foreground mb-1.5">Resources</label>
         <p className="text-xs text-muted-foreground mb-2">
-          Reserve CPU and memory for each sandbox. Leave blank to use the provider&apos;s default
-          reservation.
+          Reserve CPU and memory for each session machine. Leave blank to use the provider&apos;s
+          default reservation.
         </p>
         <div className="grid gap-3 max-w-sm sm:grid-cols-2">
           <div>
@@ -799,9 +799,9 @@ export function SandboxSettingsPage() {
 
   return (
     <div>
-      <h2 className="text-xl font-semibold text-foreground mb-1">Sandbox</h2>
+      <h2 className="text-xl font-semibold text-foreground mb-1">Execution</h2>
       <p className="text-sm text-muted-foreground mb-6">
-        Configure sandbox environment settings. Per-repo settings override global defaults.
+        Configure execution environment settings. Per-repo settings override global defaults.
       </p>
 
       {/* Repo selector */}

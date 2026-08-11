@@ -56,7 +56,7 @@ export function EnvironmentIntegrationSettings({
       <EnvironmentCodeServerOverride environmentId={environmentId} />
 
       <div>
-        <h3 className="text-sm font-medium text-foreground mb-1">Sandbox</h3>
+        <h3 className="text-sm font-medium text-foreground mb-1">Execution</h3>
         <p className="text-xs text-muted-foreground mb-3">
           Inherited values are shown as the current settings; saving only pins the fields you
           change.

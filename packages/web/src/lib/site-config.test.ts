@@ -51,18 +51,18 @@ describe("site-config", () => {
     expect(APP_NAME).toBe("Acme Bot");
   });
 
-  it("APP_SHORT_NAME defaults to 'Inspect' when nothing is set", async () => {
+  it("APP_SHORT_NAME defaults to 'Outposts' when nothing is set", async () => {
     delete process.env.NEXT_PUBLIC_APP_NAME;
     delete process.env.NEXT_PUBLIC_APP_SHORT_NAME;
     const { APP_SHORT_NAME } = await import("./site-config");
-    expect(APP_SHORT_NAME).toBe("Inspect");
+    expect(APP_SHORT_NAME).toBe("Outposts");
   });
 
-  it("APP_SHORT_NAME defaults to 'Inspect' when NEXT_PUBLIC_APP_NAME is the built-in default", async () => {
+  it("APP_SHORT_NAME defaults to 'Outposts' when NEXT_PUBLIC_APP_NAME is the built-in default", async () => {
     process.env.NEXT_PUBLIC_APP_NAME = "OpenOutposts";
     delete process.env.NEXT_PUBLIC_APP_SHORT_NAME;
     const { APP_SHORT_NAME } = await import("./site-config");
-    expect(APP_SHORT_NAME).toBe("Inspect");
+    expect(APP_SHORT_NAME).toBe("Outposts");
   });
 
   it("APP_SHORT_NAME falls through to custom APP_NAME when only NEXT_PUBLIC_APP_NAME is set", async () => {

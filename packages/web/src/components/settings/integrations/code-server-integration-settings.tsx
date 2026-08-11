@@ -71,8 +71,8 @@ export function CodeServerIntegrationSettings() {
     <div>
       <h3 className="text-lg font-semibold text-foreground mb-1">Code Server</h3>
       <p className="text-sm text-muted-foreground mb-6">
-        Attach a browser-based VS Code editor to sandbox sessions. When enabled, each new session
-        gets a code-server instance accessible via a tunnel URL.
+        Attach a browser-based VS Code editor to sessions. When enabled, each new session gets a
+        code-server instance accessible via a tunnel URL.
       </p>
 
       <GlobalSettingsSection settings={settings} availableRepos={availableRepos} />
@@ -190,7 +190,7 @@ function GlobalSettingsSection({
           <div>
             <span className="font-medium text-foreground">Enable code-server</span>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Attach a VS Code editor to new sandbox sessions
+              Attach a VS Code editor to new sessions
             </p>
           </div>
           <input
