@@ -210,6 +210,35 @@ async function handleHomesteadStatus(
 }
 
 /**
+ * Tell a signed-in owner whether any homestead can currently accept work.
+ * The internal status carries identities, versions, harnesses, catalog
+ * summaries, and timestamps; none of those are needed by first-use preflight.
+ */
+async function handleHomesteadReadiness(
+  _request: Request,
+  env: Env,
+  _match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  requireOutpostOwner(ctx);
+  if (!env.HOMESTEAD) return error("Homestead registry is not configured", 503);
+
+  const response = await env.HOMESTEAD.get(env.HOMESTEAD.idFromName("default")).fetch(
+    "http://internal/status"
+  );
+  if (!response.ok) return error("Unable to read homestead readiness", 502);
+
+  const status = (await response.json().catch(() => null)) as { connected?: unknown } | null;
+  if (typeof status?.connected !== "boolean") {
+    return error("Homestead registry returned an invalid status", 502);
+  }
+  return Response.json(
+    { connected: status.connected },
+    { headers: { "Cache-Control": "no-store" } }
+  );
+}
+
+/**
  * Rotate the two in-memory credentials a homestead needs after a restart.
  *
  * Authentication is enforced by the router's internal-only outpost branch.
@@ -292,6 +321,11 @@ export const outpostRoutes: Route[] = [
     method: "GET",
     pattern: parsePattern("/homesteads"),
     handler: handleHomesteadStatus,
+  },
+  {
+    method: "GET",
+    pattern: parsePattern("/homesteads/readiness"),
+    handler: handleHomesteadReadiness,
   },
   {
     method: "POST",

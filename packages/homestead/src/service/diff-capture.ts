@@ -359,8 +359,8 @@ export async function buildDiffBundle(
  * credential. Serialized: one capture at a time, the latest trigger wins.
  */
 export class SessionDiffPublisher {
-  #inFlight = false;
-  #pending: { triggerMessageId: string | null } | null = null;
+  #drainPromise: Promise<void> | null = null;
+  #pending: { triggerMessageId: string | null; signal?: AbortSignal } | null = null;
   #unsupported = false;
 
   constructor(
@@ -369,36 +369,45 @@ export class SessionDiffPublisher {
       productSessionId: string;
       sandboxAuthToken: string;
       repositories: DiffRepositoryIdentity[];
-      run: (fn: (homestead: WorkspaceHomestead) => Promise<DiffBundle>) => Promise<DiffBundle>;
+      run: (
+        fn: (homestead: WorkspaceHomestead) => Promise<DiffBundle>,
+        signal?: AbortSignal
+      ) => Promise<DiffBundle>;
       log: (message: string, fields?: Record<string, unknown>) => void;
     }
   ) {}
 
-  refresh(triggerMessageId: string | null): void {
-    if (this.#unsupported || this.options.repositories.length === 0) return;
-    this.#pending = { triggerMessageId };
-    if (!this.#inFlight) void this.#drain();
+  refresh(triggerMessageId: string | null, signal?: AbortSignal): Promise<void> {
+    if (this.#unsupported || this.options.repositories.length === 0 || signal?.aborted) {
+      return Promise.resolve();
+    }
+    this.#pending = { triggerMessageId, ...(signal === undefined ? {} : { signal }) };
+    this.#drainPromise ??= this.#drain();
+    return this.#drainPromise;
   }
 
   async #drain(): Promise<void> {
-    this.#inFlight = true;
     try {
       while (this.#pending) {
-        const { triggerMessageId } = this.#pending;
+        const { triggerMessageId, signal } = this.#pending;
         this.#pending = null;
+        if (signal?.aborted) continue;
         try {
-          const bundle = await this.options.run((homestead) =>
-            buildDiffBundle(homestead, this.options.repositories, triggerMessageId)
+          const bundle = await this.options.run(
+            (homestead) => buildDiffBundle(homestead, this.options.repositories, triggerMessageId),
+            signal
           );
+          if (signal?.aborted) continue;
           await this.#publish(bundle);
         } catch (error) {
+          if (signal?.aborted) continue;
           await this.#reportFailure(
             error instanceof Error ? error.message : "Session diff refresh failed"
           );
         }
       }
     } finally {
-      this.#inFlight = false;
+      this.#drainPromise = null;
     }
   }
 

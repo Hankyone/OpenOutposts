@@ -29,6 +29,8 @@ interface BoundSession {
 }
 
 interface OutpostStatusResponse {
+  connected?: boolean;
+  lastHeartbeatAt?: string;
   activeLeases?: BoundSession[];
 }
 
@@ -58,11 +60,15 @@ async function handleListBoundSessions(
   const response = await target.stub.fetch("http://internal/status");
   // A machine that has never registered has no leases to report, which is an
   // answer rather than a failure.
-  if (response.status === 404) return json({ sessions: [] });
+  if (response.status === 404) {
+    return json({ connected: false, lastHeartbeatAt: null, sessions: [] });
+  }
   if (!response.ok) return error("Unable to read the machine's leases", 502);
 
   const status = (await response.json()) as OutpostStatusResponse;
   return json({
+    connected: status.connected === true,
+    lastHeartbeatAt: status.lastHeartbeatAt ?? null,
     sessions: (status.activeLeases ?? []).map((lease) => ({
       leaseId: lease.leaseId,
       productSessionId: lease.productSessionId,

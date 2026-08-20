@@ -29,13 +29,14 @@ interface ProviderCredentialsResponse {
 
 export function useProviderCredentials() {
   const { data: session } = useAuthSession();
-  const { data, isLoading, mutate } = useSWR<ProviderCredentialsResponse>(
+  const { data, error, isLoading, mutate } = useSWR<ProviderCredentialsResponse>(
     session ? PROVIDER_CREDENTIALS_KEY : null
   );
 
   return {
     credentials: data?.credentials ?? [],
     loading: isLoading,
+    unavailable: Boolean(error),
     mutate,
   };
 }

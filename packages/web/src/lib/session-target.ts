@@ -1,34 +1,25 @@
 /**
- * The new-session picker's target selection: nothing, a single repository
- * (today's behavior, branch dropdown included), a named environment, or an
- * ad-hoc ordered repository list ([0] = primary). The three launchable forms
- * map onto the mutually exclusive modes of createSessionRequestSchema —
- * buildSessionTargetRequestFields emits exactly one mode's fields so the
- * exclusivity refinement can never trip on picker-built requests.
+ * The new-session picker's repository selection: nothing, a single repository
+ * (branch dropdown included), a named environment, or an ad-hoc ordered
+ * repository list ([0] = primary). Machine placement is orthogonal: each
+ * repository form may carry an outpost id without becoming a fifth target
+ * mode. This keeps repository and machine selection independent while one
+ * object still identifies the full in-flight session configuration.
  */
 
 import { parseRepositoryFullName } from "@open-inspect/shared";
 
-export type SessionTarget =
+type SessionRepositoryTarget =
   | { kind: "none" }
   | { kind: "repo"; repoFullName: string }
   | { kind: "environment"; environmentId: string }
-  | { kind: "repos"; repoFullNames: string[] }
-  | { kind: "outpost"; outpostId: string };
+  | { kind: "repos"; repoFullNames: string[] };
+
+export type SessionTarget = SessionRepositoryTarget & { outpostId?: string };
 
 export const NO_REPOSITORY_OPTION_VALUE = "__no_repository__";
 export const MULTIPLE_REPOSITORIES_OPTION_VALUE = "__multiple_repositories__";
 const ENVIRONMENT_OPTION_PREFIX = "env:";
-const OUTPOST_OPTION_PREFIX = "outpost:";
-
-export function outpostOptionValue(outpostId: string): string {
-  return `${OUTPOST_OPTION_PREFIX}${outpostId}`;
-}
-
-/** The outpost id encoded in an `outpost:<id>` option value, or null. */
-export function parseOutpostOptionValue(value: string): string | null {
-  return value.startsWith(OUTPOST_OPTION_PREFIX) ? value.slice(OUTPOST_OPTION_PREFIX.length) : null;
-}
 
 export function environmentOptionValue(environmentId: string): string {
   return `${ENVIRONMENT_OPTION_PREFIX}${environmentId}`;
@@ -57,9 +48,14 @@ export function getTargetSelectValue(target: SessionTarget | null): string {
       return environmentOptionValue(target.environmentId);
     case "repos":
       return MULTIPLE_REPOSITORIES_OPTION_VALUE;
-    case "outpost":
-      return outpostOptionValue(target.outpostId);
   }
+}
+
+function retainOutpost(
+  target: SessionRepositoryTarget,
+  previous: SessionTarget | null
+): SessionTarget {
+  return previous?.outpostId ? { ...target, outpostId: previous.outpostId } : target;
 }
 
 /**
@@ -71,23 +67,33 @@ export function parseTargetSelectValue(
   value: string,
   previous: SessionTarget | null
 ): SessionTarget {
-  if (value === NO_REPOSITORY_OPTION_VALUE) return { kind: "none" };
+  if (value === NO_REPOSITORY_OPTION_VALUE) {
+    return retainOutpost({ kind: "none" }, previous);
+  }
   if (value === MULTIPLE_REPOSITORIES_OPTION_VALUE) {
     if (previous?.kind === "repos") return previous;
-    return {
-      kind: "repos",
-      repoFullNames: previous?.kind === "repo" ? [previous.repoFullName.toLowerCase()] : [],
-    };
+    return retainOutpost(
+      {
+        kind: "repos",
+        repoFullNames: previous?.kind === "repo" ? [previous.repoFullName.toLowerCase()] : [],
+      },
+      previous
+    );
   }
   const environmentId = parseEnvironmentOptionValue(value);
   if (environmentId !== null) {
-    return { kind: "environment", environmentId };
+    return retainOutpost({ kind: "environment", environmentId }, previous);
   }
-  const outpostId = parseOutpostOptionValue(value);
-  if (outpostId !== null) {
-    return { kind: "outpost", outpostId };
-  }
-  return { kind: "repo", repoFullName: value };
+  return retainOutpost({ kind: "repo", repoFullName: value }, previous);
+}
+
+/** Return the same repository target with a new independent machine choice. */
+export function setSessionTargetOutpost(
+  target: SessionTarget,
+  outpostId: string | null
+): SessionTarget {
+  const { outpostId: _previousOutpostId, ...repositoryTarget } = target;
+  return outpostId ? { ...repositoryTarget, outpostId } : repositoryTarget;
 }
 
 /**
@@ -97,9 +103,11 @@ export function parseTargetSelectValue(
  */
 export function getTargetConfigKey(target: SessionTarget | null): string {
   if (!target) return "";
-  return target.kind === "repos"
-    ? `repos:${target.repoFullNames.join(",")}`
-    : getTargetSelectValue(target);
+  const repositoryKey =
+    target.kind === "repos"
+      ? `repos:${target.repoFullNames.join(",")}`
+      : getTargetSelectValue(target);
+  return `${repositoryKey}|outpost:${target.outpostId ?? ""}`;
 }
 
 /** Whether the selection is complete enough to create a session from. */
@@ -113,12 +121,22 @@ export function isSessionTargetLaunchable(target: SessionTarget | null): boolean
  * scalar repo form, `environmentId`, or `repositories` (design §5.5). Mirrors
  * the mutually exclusive modes of createSessionRequestSchema.
  */
-export type SessionTargetRequestFields =
+type SessionRepositoryRequestFields =
   | { repoOwner: null; repoName: null }
   | { repoOwner: string; repoName: string; branch?: string }
   | { environmentId: string }
-  | { repositories: Array<{ repoOwner: string; repoName: string }> }
-  | { repoOwner: null; repoName: null; outpostId: string };
+  | { repositories: Array<{ repoOwner: string; repoName: string }> };
+
+export type SessionTargetRequestFields = SessionRepositoryRequestFields & {
+  outpostId?: string;
+};
+
+function includeOutpost(
+  fields: SessionRepositoryRequestFields,
+  outpostId: string | undefined
+): SessionTargetRequestFields {
+  return outpostId ? { ...fields, outpostId } : fields;
+}
 
 export function buildSessionTargetRequestFields(
   target: SessionTarget,
@@ -126,27 +144,31 @@ export function buildSessionTargetRequestFields(
 ): SessionTargetRequestFields {
   switch (target.kind) {
     case "none":
-      return { repoOwner: null, repoName: null };
+      return includeOutpost({ repoOwner: null, repoName: null }, target.outpostId);
     case "repo": {
       const repository = parseRepositoryFullName(target.repoFullName);
-      if (!repository) return { repoOwner: null, repoName: null };
-      return {
-        repoOwner: repository.repoOwner,
-        repoName: repository.repoName,
-        branch: selectedBranch || undefined,
-      };
+      if (!repository) {
+        return includeOutpost({ repoOwner: null, repoName: null }, target.outpostId);
+      }
+      return includeOutpost(
+        {
+          repoOwner: repository.repoOwner,
+          repoName: repository.repoName,
+          branch: selectedBranch || undefined,
+        },
+        target.outpostId
+      );
     }
     case "environment":
-      return { environmentId: target.environmentId };
+      return includeOutpost({ environmentId: target.environmentId }, target.outpostId);
     case "repos":
-      return {
-        repositories: target.repoFullNames
-          .map(parseRepositoryFullName)
-          .filter((repository) => repository !== null),
-      };
-    case "outpost":
-      // Repo-less for now: the session works directly on the outpost's
-      // workspace. Repository cloning onto outposts is a separate increment.
-      return { repoOwner: null, repoName: null, outpostId: target.outpostId };
+      return includeOutpost(
+        {
+          repositories: target.repoFullNames
+            .map(parseRepositoryFullName)
+            .filter((repository) => repository !== null),
+        },
+        target.outpostId
+      );
   }
 }

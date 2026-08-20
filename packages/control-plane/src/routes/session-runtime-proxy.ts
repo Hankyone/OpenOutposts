@@ -1,4 +1,5 @@
 import { applyIdentityEnforcement } from "../auth/identity-enforcement";
+import { sessionStartupFailureRequestSchema } from "@openoutposts/outpost-protocol";
 import { SessionInternalPaths, type SessionInternalPath } from "../session/contracts";
 import type { Env } from "../types";
 import { error, parseJsonBody, parsePattern, type Route } from "./shared";
@@ -117,6 +118,27 @@ async function handleCreatePR(
   });
 }
 
+async function handleStartupFailure(
+  request: Request,
+  _env: Env,
+  match: RegExpMatchArray,
+  ctx: SessionRouteContext
+): Promise<Response> {
+  const sessionId = getSessionId(match);
+  if (sessionId instanceof Response) return sessionId;
+
+  const parsed = sessionStartupFailureRequestSchema.safeParse(
+    await request.json().catch(() => null)
+  );
+  if (!parsed.success) return error("Invalid startup failure report", 400);
+
+  return ctx.sessionRuntime.fetch(sessionId, SessionInternalPaths.startupFailure, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(parsed.data),
+  });
+}
+
 /**
  * Read a lifecycle-route body (title/archive/unarchive) under identity
  * enforcement. Lifecycle routes accept bodyless requests — a parse failure
@@ -173,6 +195,11 @@ export const sessionRuntimeProxyRoutes: Route[] = [
     routePath: "/sessions/:id",
     internalPath: SessionInternalPaths.state,
     notFoundMessage: "Session not found",
+  }),
+  sessionRoute({
+    method: "POST",
+    pattern: parsePattern("/sessions/:id/startup-failure"),
+    handler: handleStartupFailure,
   }),
   simpleProxyRoute({
     method: "POST",

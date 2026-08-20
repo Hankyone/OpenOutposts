@@ -85,5 +85,11 @@ export function useModelCatalog() {
 
   const catalog = !error && data?.source === "homestead" ? data : null;
 
-  return { catalog, loading: isLoading };
+  return {
+    catalog,
+    view: error ? null : (data ?? null),
+    source: error ? ("error" as const) : (data?.source ?? null),
+    loading: isLoading,
+    unavailable: Boolean(error),
+  };
 }

@@ -135,6 +135,25 @@ describe("sessionSocketReducer", () => {
       expect(state.sessionState?.isProcessing).toBe(true);
       expect(state.sessionState?.totalCost).toBe(1.25);
     });
+
+    it("hydrates a persisted startup failure only for a failed runtime", () => {
+      const failed = subscribedState({
+        state: createSessionState({ sandboxStatus: "failed" }),
+        spawnError: "repository clone failed",
+      });
+      expect(failed.startupError).toBe("repository clone failed");
+
+      const recovered = reduce(
+        failed,
+        serverMessage(
+          createSubscribedMessage({
+            state: createSessionState({ sandboxStatus: "ready" }),
+            spawnError: "stale failure",
+          })
+        )
+      );
+      expect(recovered.startupError).toBeNull();
+    });
   });
 
   describe("events_appended", () => {
@@ -319,6 +338,7 @@ describe("sessionSocketReducer", () => {
       expect(state.sessionState?.sandboxStatus).toBe("failed");
       expect(state.sessionState?.codeServerUrl).toBeUndefined();
       expect(state.sessionState?.sandboxDashboardUrl).toBe("https://provider.example");
+      expect(state.startupError).toBe("boom");
     });
 
     it("tracks warming, spawning, and ready transitions", () => {
@@ -328,6 +348,18 @@ describe("sessionSocketReducer", () => {
       expect(state.sessionState?.sandboxStatus).toBe("spawning");
       state = reduce(state, serverMessage({ type: "sandbox_ready" }));
       expect(state.sessionState?.sandboxStatus).toBe("ready");
+      expect(state.startupError).toBeNull();
+    });
+
+    it("clears the previous startup failure when a retry begins", () => {
+      const failed = reduce(
+        subscribedState(),
+        serverMessage({ type: "sandbox_error", error: "clone failed" })
+      );
+      const retrying = reduce(failed, serverMessage({ type: "sandbox_spawning" }));
+
+      expect(retrying.startupError).toBeNull();
+      expect(retrying.sessionState?.sandboxStatus).toBe("spawning");
     });
   });
 

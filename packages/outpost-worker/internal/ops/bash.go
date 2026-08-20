@@ -1,7 +1,6 @@
 package ops
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Hankyone/OpenOutposts/packages/outpost-worker/internal/protocol"
 )
@@ -38,15 +36,11 @@ const (
 	// limit the control plane will accept.
 	maxStdoutBytes = 700_000
 	maxStderrBytes = 100_000
-	// Headroom for the rest of the tool.result envelope: message type,
-	// protocol version, request and lease IDs, exit code, duration, and the
-	// JSON punctuation around them.
-	resultEnvelopeBytes = 8_192
 )
 
-// Overflowing this conversion is a compile error, so the two caps and the
-// envelope headroom can never be raised past what one frame holds.
-const _ = uint(protocol.MaxFrameBytes - maxStdoutBytes - maxStderrBytes - resultEnvelopeBytes)
+// Overflowing this conversion is a compile error, so bash's two string
+// budgets cannot exceed the shared encoded operation-output budget.
+const _ = uint(protocol.MaxToolOutputBytes - maxStdoutBytes - maxStderrBytes)
 
 type bashInput struct {
 	Command   string `json:"command"`
@@ -60,90 +54,6 @@ type bashResult struct {
 	ExitCode   int    `json:"exitCode"`
 	DurationMs int64  `json:"durationMs"`
 	Truncated  bool   `json:"truncated"`
-}
-
-// cappedBuffer keeps as much output as fits in limit JSON-escaped bytes and
-// records whether it overflowed. It never rejects a write, because the process
-// on the other end must keep draining; it simply stops retaining.
-type cappedBuffer struct {
-	buf       bytes.Buffer
-	limit     int
-	spent     int
-	partial   []byte
-	truncated bool
-}
-
-// jsonEscapedCost reports the bytes a decoded rune occupies inside a JSON
-// string as encoding/json writes it. wsjson encodes with an Encoder, which
-// leaves HTML escaping on, so <, > and & cost six. Quote, backslash, newline,
-// carriage return and tab cost two; other control bytes cost six; a byte that
-// is not valid UTF-8 becomes the six bytes of the escaped replacement
-// character; and the line and paragraph separators are escaped too.
-func jsonEscapedCost(decoded rune, size int, first byte) int {
-	if size == 1 {
-		switch {
-		case decoded == utf8.RuneError:
-			return 6
-		case first == '"' || first == '\\' || first == '\n' || first == '\r' || first == '\t':
-			return 2
-		case first < 0x20 || first == '<' || first == '>' || first == '&':
-			return 6
-		default:
-			return 1
-		}
-	}
-	if decoded == '\u2028' || decoded == '\u2029' {
-		return 6
-	}
-	return size
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	accepted := len(p)
-	if c.truncated {
-		return accepted, nil
-	}
-
-	data := p
-	if len(c.partial) > 0 {
-		data = append(c.partial, p...)
-		c.partial = nil
-	}
-
-	for index := 0; index < len(data); {
-		// A rune straddling two writes must wait for its remaining bytes
-		// rather than be charged as invalid and replaced on the wire.
-		if !utf8.FullRune(data[index:]) {
-			c.partial = append([]byte(nil), data[index:]...)
-			break
-		}
-		decoded, size := utf8.DecodeRune(data[index:])
-		cost := jsonEscapedCost(decoded, size, data[index])
-		if c.spent+cost > c.limit {
-			c.truncated = true
-			break
-		}
-		c.buf.Write(data[index : index+size])
-		c.spent += cost
-		index += size
-	}
-	return accepted, nil
-}
-
-// string finalises the buffer, charging any trailing incomplete rune as the
-// invalid bytes it turned out to be.
-func (c *cappedBuffer) string() string {
-	for _, b := range c.partial {
-		cost := jsonEscapedCost(utf8.RuneError, 1, b)
-		if c.spent+cost > c.limit {
-			c.truncated = true
-			break
-		}
-		c.buf.WriteByte(b)
-		c.spent += cost
-	}
-	c.partial = nil
-	return c.buf.String()
 }
 
 func (x Executor) bash(ctx context.Context, workspace string, raw json.RawMessage) (any, error) {

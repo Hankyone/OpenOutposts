@@ -9,6 +9,7 @@ export {
   type ToolCallResult,
 } from "./outpost-client.js";
 export { PiHarness, type PiHarnessOptions } from "./pi/harness.js";
+export { PiHarnessFactory, type PiHarnessFactoryOptions } from "./pi/factory.js";
 export {
   createOutpostAgentSession,
   splitModelSpec,
@@ -63,6 +64,11 @@ export {
   type OutpostToolTransport,
 } from "./pi/tools.js";
 export { HomesteadDaemon, type HomesteadDaemonOptions } from "./service/homestead-daemon.js";
+export {
+  indexSessionHarnessFactories,
+  type CreateSessionHarnessInput,
+  type SessionHarnessFactory,
+} from "./service/harness-factory.js";
 export { BridgeSession, readTurnRequest, type TurnReadResult } from "./service/bridge-session.js";
 export { BridgeTurnTranslator, type BridgeEvent } from "./service/bridge-events.js";
 
@@ -132,27 +138,4 @@ export interface AgentHarness {
   sendPrompt(session: HarnessSessionReference, turn: TurnRequest): AsyncIterable<HarnessEvent>;
   interrupt(session: HarnessSessionReference): Promise<void>;
   close(session: HarnessSessionReference): Promise<void>;
-}
-
-export class HarnessRegistry {
-  readonly #harnesses = new Map<HarnessKind, AgentHarness>();
-
-  register(harness: AgentHarness): void {
-    if (this.#harnesses.has(harness.kind)) {
-      throw new Error(`Harness already registered: ${harness.kind}`);
-    }
-    this.#harnesses.set(harness.kind, harness);
-  }
-
-  get(kind: HarnessKind): AgentHarness {
-    const harness = this.#harnesses.get(kind);
-    if (!harness) {
-      throw new Error(`Harness not registered: ${kind}`);
-    }
-    return harness;
-  }
-
-  list(): HarnessKind[] {
-    return [...this.#harnesses.keys()];
-  }
 }

@@ -17,7 +17,22 @@ const Version = 5
 // directions must derive from this one number: a worker read limit larger than
 // the control plane's inbound limit only hides the mismatch until a large
 // result silently drops the connection.
-const MaxFrameBytes = 1 << 20
+const (
+	MaxFrameBytes = 1 << 20
+
+	// MaxToolResultEnvelopeBytes reserves the non-output part of a successful
+	// tool.result. Each of the two protocol identifiers may contain 200
+	// characters; at encoding/json's worst valid string cost that is
+	// 2 * 200 * 6 = 2,400 bytes. The remaining 5,792 bytes cover keys, fixed
+	// fields, punctuation and future compatible additions without allowing an
+	// operation-local result to consume the transport ceiling.
+	MaxToolResultEnvelopeBytes = 8 << 10
+	MaxToolOutputBytes         = MaxFrameBytes - MaxToolResultEnvelopeBytes
+)
+
+// Overflowing this conversion is a compile error, so the output budget and
+// its envelope reserve cannot drift past the one-frame transport ceiling.
+const _ = uint(MaxFrameBytes - MaxToolOutputBytes - MaxToolResultEnvelopeBytes)
 
 type Capabilities struct {
 	Platform       string   `json:"platform"`
@@ -101,15 +116,15 @@ type ServerMessage struct {
 	ProtocolVersion     int             `json:"protocolVersion"`
 	OutpostID           string          `json:"outpostId,omitempty"`
 	ConnectionID        string          `json:"connectionId,omitempty"`
-	RegisteredAt        time.Time       `json:"registeredAt,omitempty"`
+	RegisteredAt        time.Time       `json:"registeredAt,omitempty,omitzero"`
 	HeartbeatIntervalMS int             `json:"heartbeatIntervalMs,omitempty"`
-	ReceivedAt          time.Time       `json:"receivedAt,omitempty"`
+	ReceivedAt          time.Time       `json:"receivedAt,omitempty,omitzero"`
 	Code                string          `json:"code,omitempty"`
 	Message             string          `json:"message,omitempty"`
 	LeaseID             string          `json:"leaseId,omitempty"`
 	ProductSessionID    string          `json:"productSessionId,omitempty"`
 	WorkspacePath       string          `json:"workspacePath,omitempty"`
-	ExpiresAt           time.Time       `json:"expiresAt,omitempty"`
+	ExpiresAt           time.Time       `json:"expiresAt,omitempty,omitzero"`
 	Reason              string          `json:"reason,omitempty"`
 	RequestID           string          `json:"requestId,omitempty"`
 	Operation           string          `json:"operation,omitempty"`

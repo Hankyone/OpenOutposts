@@ -43,7 +43,12 @@ function createEnv(overrides?: {
   singleUserId?: string;
 }) {
   const outpostFetch = vi.fn(async () => Response.json({ ok: true }));
-  const homesteadFetch = vi.fn(async () => Response.json({ homesteads: [] }));
+  const homesteadFetch = vi.fn(async () =>
+    Response.json({
+      connected: true,
+      homesteads: [{ id: "private-homestead", harnesses: ["pi"] }],
+    })
+  );
 
   let boundValues: unknown[] = [];
   let lastQuery = "";
@@ -232,6 +237,45 @@ describe("GET /outposts stays reachable for end-user credentials", () => {
     );
 
     expect(response.status).toBe(403);
+  });
+});
+
+describe("GET /homesteads/readiness is owner-safe", () => {
+  it("rejects unauthenticated requests", async () => {
+    const { env, homesteadFetch } = createEnv();
+
+    const response = await handleRequest(
+      new Request("https://test.local/homesteads/readiness"),
+      env as never
+    );
+
+    expect(response.status).toBe(401);
+    expect(homesteadFetch).not.toHaveBeenCalled();
+  });
+
+  it("projects internal status down to connected only", async () => {
+    const { env, homesteadFetch } = createEnv();
+
+    const response = await handleRequest(userRequest("/homesteads/readiness"), env as never);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({ connected: true });
+    expect(homesteadFetch).toHaveBeenCalledOnce();
+  });
+
+  it("refuses service credentials on the owner-facing projection", async () => {
+    const { env, homesteadFetch } = createEnv();
+
+    const response = await handleRequest(
+      await signedServiceRequest("https://test.local/homesteads/readiness", {
+        service: "homestead",
+      }),
+      env as never
+    );
+
+    expect(response.status).toBe(403);
+    expect(homesteadFetch).not.toHaveBeenCalled();
   });
 });
 

@@ -35,6 +35,8 @@ import { ReasoningEffortPills } from "@/components/reasoning-effort-pills";
 import { ModelPicker } from "@/components/model-picker";
 import { PaperclipIcon, SendIcon } from "@/components/ui/icons";
 import type { ComboboxGroup } from "@/components/ui/combobox";
+import { SessionReadiness, type ReadinessItem } from "@/components/session-readiness";
+import { useSessionReadiness } from "@/hooks/use-session-readiness";
 
 const LAST_SELECTED_MODEL_STORAGE_KEY = "openoutposts-last-selected-model";
 const LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY = "openoutposts-last-selected-reasoning-effort";
@@ -88,6 +90,7 @@ export default function Home() {
     modelPicker.fromCatalog,
     modelPicker.reasoningByModel
   );
+  const readinessItems = useSessionReadiness(picker, selectedModel);
 
   useEffect(() => {
     if (abortControllerRef.current) {
@@ -303,6 +306,7 @@ export default function Home() {
       modelOptions={modelPicker.items}
       needsProviderConnection={modelPicker.needsProviderConnection}
       catalogReasoning={modelPicker.reasoningByModel.get(selectedModel)}
+      readinessItems={readinessItems}
     />
   );
 }
@@ -325,6 +329,7 @@ function HomeContent({
   modelOptions,
   needsProviderConnection,
   catalogReasoning,
+  readinessItems,
 }: {
   isAuthenticated: boolean;
   picker: SessionTargetSelection;
@@ -351,6 +356,7 @@ function HomeContent({
   needsProviderConnection: boolean;
   /** The selected model's reasoning support, when the harness catalog names it. */
   catalogReasoning: CatalogModelReasoning | null | undefined;
+  readinessItems: ReadinessItem[];
 }) {
   const { isOpen } = useSidebarContext();
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -511,6 +517,8 @@ function HomeContent({
                   </span>
                 </div>
               </div>
+
+              <SessionReadiness items={readinessItems} />
 
               {sessionTarget?.kind === "repos" && (
                 <p className="mt-3 text-xs text-muted-foreground text-center">

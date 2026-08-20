@@ -25,6 +25,7 @@ import { streamTurn } from "./turn.js";
 // Renew the session lease at a third of its default one-hour life, so long
 // sessions never run into expiry even across two missed attempts.
 const LEASE_RENEW_INTERVAL_MS = 20 * 60 * 1000;
+const PI_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
 
 /**
  * Who commits when the control plane resolved no user to attribute the turn
@@ -405,11 +406,60 @@ export class PiHarness implements AgentHarness {
     if (!runtime) return;
     this.#sessions.delete(session.harnessSessionId);
     clearInterval(runtime.renewTimer);
-    runtime.session.dispose();
-    await this.#options.outposts
-      .releaseLease(this.#options.outpostId, runtime.leaseId, "completed")
-      .catch(() => {});
-    await runtime.home.remove().catch(() => {});
+
+    // Pi abort and worker cancellation are independent drains. Start both
+    // before awaiting either so model shutdown cannot leave an outpost command
+    // running, and an unreachable outpost cannot hold model shutdown open.
+    const cancelOutpostWork = this.#settleCloseWork(
+      () => this.#options.outposts.cancelLeaseWork(this.#options.outpostId, runtime.leaseId),
+      "outpost work cancellation"
+    );
+    const abortPi = this.#settleCloseWork(() => runtime.session.abort(), "pi abort");
+    const drained = Promise.all([abortPi, cancelOutpostWork]);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const outcome = await Promise.race([
+      drained.then(() => "drained" as const),
+      new Promise<"timed-out">((resolve) => {
+        timer = setTimeout(() => resolve("timed-out"), PI_CLOSE_DRAIN_TIMEOUT_MS);
+      }),
+    ]);
+    if (timer !== null) clearTimeout(timer);
+    if (outcome === "timed-out") {
+      this.#options.onLog?.(
+        `harness: pi close drain timed out after ${PI_CLOSE_DRAIN_TIMEOUT_MS}ms`
+      );
+    }
+
+    // Disposal and every resource cleanup are isolated. A stuck or failed
+    // drain must not keep the lease or scratch home alive indefinitely, and a
+    // failed release must not skip removal of the credential-free home.
+    try {
+      runtime.session.dispose();
+    } catch (error) {
+      this.#options.onLog?.(
+        `harness: pi disposal failed during close: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    await this.#settleCloseWork(
+      () =>
+        this.#options.outposts.releaseLease(this.#options.outpostId, runtime.leaseId, "completed"),
+      "lease release"
+    );
+    await this.#settleCloseWork(() => runtime.home.remove(), "scratch home removal");
+  }
+
+  #settleCloseWork(work: () => Promise<void>, description: string): Promise<void> {
+    let started: Promise<void>;
+    try {
+      started = work();
+    } catch (error) {
+      started = Promise.reject(error);
+    }
+    return started.catch((error: unknown) => {
+      this.#options.onLog?.(
+        `harness: ${description} failed during close: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
   }
 
   #requireRuntime(session: HarnessSessionReference): SessionRuntime {

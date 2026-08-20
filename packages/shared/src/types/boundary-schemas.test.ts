@@ -243,6 +243,7 @@ describe("boundary schemas", () => {
         { type: "tool_result", callId: "call-1", result: "head…" },
         { type: "token", content: "head…" },
         { type: "error", error: "head…" },
+        { type: "execution_complete", success: false, error: "head…" },
       ];
 
       for (const partial of cases) {

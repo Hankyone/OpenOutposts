@@ -126,92 +126,155 @@ export function storedEventByteLength(event: unknown): number {
  * Without the marker the shortened output would read as the whole output,
  * which is worse than storing nothing.
  */
-export type StoredSandboxEvent = SandboxEvent & { truncated?: boolean };
+export type StoredSandboxEvent<T extends SandboxEvent = SandboxEvent> = T & {
+  truncated?: boolean;
+};
 
 /**
  * Returns the event to store, trimmed if it is over the ceiling.
  *
  * The original object is returned untouched when it fits, so the common case
- * costs one serialization and no copy. Over the ceiling, the event's dominant
- * string field is shortened and every other field is kept: the fields that say
- * WHICH command ran, on which call, at what time are tiny and are exactly what
- * makes the surviving fragment interpretable.
+ * costs one serialization and no copy. Over the ceiling, explicitly safe
+ * payload strings are shortened largest-first and every structural field is
+ * kept: the fields that say WHICH command ran, on which call, at what time are
+ * exactly what makes the surviving fragment interpretable.
  *
- * Types with no dominant field — user messages, artifacts, push and lifecycle
- * events — pass through unchanged. Each is small by construction, and guessing
- * at which of an unfamiliar event's fields is safe to destroy is worse than
- * storing it whole.
+ * An oversized type with no safe payload rule, or an event whose structural
+ * fields cannot fit even after every safe string is shortened, returns null.
+ * Callers skip only that stored copy; the live event continues unchanged.
  */
-export function boundSandboxEventForStorage(
-  event: SandboxEvent,
+export function boundSandboxEventForStorage<T extends SandboxEvent>(
+  event: T,
   maxBytes: number
-): StoredSandboxEvent {
+): StoredSandboxEvent<T> | null {
   const originalBytes = storedEventByteLength(event);
   if (originalBytes <= maxBytes) return event;
 
-  const trimmed = shrinkDominantField(event, maxBytes, originalBytes);
-  if (trimmed === null) return event;
-  return { ...trimmed, truncated: true } as StoredSandboxEvent;
+  const candidates = safeStringCandidates(event).sort(
+    (left, right) => right.originalBytes - left.originalBytes
+  );
+  if (candidates.length === 0) return null;
+
+  let stored: StoredSandboxEvent = { ...event, truncated: true };
+  for (const candidate of candidates) {
+    const currentBytes = storedEventByteLength(stored);
+    if (currentBytes <= maxBytes) return stored as StoredSandboxEvent<T>;
+
+    const shortened = shorten(candidate.original, currentBytes - maxBytes);
+    stored = replaceSafeString(stored, candidate, shortened);
+  }
+
+  return storedEventByteLength(stored) <= maxBytes ? (stored as StoredSandboxEvent<T>) : null;
 }
 
-/**
- * Shortens whichever field is carrying the weight, largest first, until the
- * event fits. Returns null when this type has no field worth shortening.
- */
-function shrinkDominantField(
-  event: SandboxEvent,
-  maxBytes: number,
-  originalBytes: number
-): SandboxEvent | null {
-  // The marker costs bytes of its own, and so does `"truncated":true`. Budget
-  // for both so the result really lands under the ceiling.
-  const overhead = originalBytes - maxBytes;
+type SafeStringCandidate =
+  | {
+      kind: "field";
+      field: "output" | "result" | "error" | "content";
+      original: string;
+      originalBytes: number;
+    }
+  | { kind: "argument"; key: string; original: string; originalBytes: number };
 
+/** Lists only fields whose contents may be shortened without changing identity. */
+function safeStringCandidates(event: SandboxEvent): SafeStringCandidate[] {
   switch (event.type) {
     case "tool_call": {
+      const candidates: SafeStringCandidate[] = [];
       if (typeof event.output === "string" && event.output.length > 0) {
-        return { ...event, output: shorten(event.output, overhead) };
+        candidates.push({
+          kind: "field",
+          field: "output",
+          original: event.output,
+          originalBytes: utf8ByteLength(event.output),
+        });
       }
-      return shrinkLargestArgument(event, overhead);
+      for (const [key, value] of Object.entries(event.args)) {
+        if (typeof value !== "string" || value.length === 0) continue;
+        candidates.push({
+          kind: "argument",
+          key,
+          original: value,
+          originalBytes: utf8ByteLength(value),
+        });
+      }
+      return candidates;
     }
     case "tool_result": {
+      const candidates: SafeStringCandidate[] = [];
       if (event.result.length > 0) {
-        return { ...event, result: shorten(event.result, overhead) };
+        candidates.push({
+          kind: "field",
+          field: "result",
+          original: event.result,
+          originalBytes: utf8ByteLength(event.result),
+        });
       }
       if (typeof event.error === "string" && event.error.length > 0) {
-        return { ...event, error: shorten(event.error, overhead) };
+        candidates.push({
+          kind: "field",
+          field: "error",
+          original: event.error,
+          originalBytes: utf8ByteLength(event.error),
+        });
       }
-      return null;
+      return candidates;
     }
     case "token":
-      return { ...event, content: shorten(event.content, overhead) };
+      return event.content.length > 0
+        ? [
+            {
+              kind: "field",
+              field: "content",
+              original: event.content,
+              originalBytes: utf8ByteLength(event.content),
+            },
+          ]
+        : [];
     case "error":
-      return { ...event, error: shorten(event.error, overhead) };
+    case "execution_complete":
+      return typeof event.error === "string" && event.error.length > 0
+        ? [
+            {
+              kind: "field",
+              field: "error",
+              original: event.error,
+              originalBytes: utf8ByteLength(event.error),
+            },
+          ]
+        : [];
     default:
-      return null;
+      return [];
   }
 }
 
-/** A tool call with no output but oversized arguments — a large written file. */
-function shrinkLargestArgument(
-  event: Extract<SandboxEvent, { type: "tool_call" }>,
-  overhead: number
-): SandboxEvent | null {
-  let largestKey: string | null = null;
-  let largestBytes = 0;
-  for (const [key, value] of Object.entries(event.args)) {
-    if (typeof value !== "string") continue;
-    const bytes = utf8ByteLength(value);
-    if (bytes > largestBytes) {
-      largestKey = key;
-      largestBytes = bytes;
+/** Replaces one previously-vetted payload string without mutating the input. */
+function replaceSafeString(
+  event: StoredSandboxEvent,
+  candidate: SafeStringCandidate,
+  shortened: string
+): StoredSandboxEvent {
+  if (event.type === "tool_call") {
+    if (candidate.kind === "argument") {
+      return { ...event, args: { ...event.args, [candidate.key]: shortened } };
     }
+    if (candidate.field === "output") return { ...event, output: shortened };
   }
-  if (largestKey === null) return null;
-  return {
-    ...event,
-    args: { ...event.args, [largestKey]: shorten(event.args[largestKey] as string, overhead) },
-  };
+  if (event.type === "tool_result" && candidate.kind === "field") {
+    if (candidate.field === "result") return { ...event, result: shortened };
+    if (candidate.field === "error") return { ...event, error: shortened };
+  }
+  if (event.type === "token" && candidate.kind === "field" && candidate.field === "content") {
+    return { ...event, content: shortened };
+  }
+  if (
+    (event.type === "error" || event.type === "execution_complete") &&
+    candidate.kind === "field" &&
+    candidate.field === "error"
+  ) {
+    return { ...event, error: shortened };
+  }
+  return event;
 }
 
 /**

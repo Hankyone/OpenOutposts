@@ -1,17 +1,20 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Hankyone/OpenOutposts/packages/outpost-worker/internal/config"
+	"github.com/Hankyone/OpenOutposts/packages/outpost-worker/internal/lease"
 	"github.com/Hankyone/OpenOutposts/packages/outpost-worker/internal/protocol"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -20,6 +23,21 @@ import (
 type cancellingExecutor struct {
 	calls   atomic.Int32
 	started chan struct{}
+}
+
+type fixedOutputExecutor struct {
+	output any
+	calls  atomic.Int32
+}
+
+func (e *fixedOutputExecutor) Execute(
+	context.Context,
+	string,
+	string,
+	json.RawMessage,
+) (any, error) {
+	e.calls.Add(1)
+	return e.output, nil
 }
 
 func (e *cancellingExecutor) Execute(
@@ -268,5 +286,52 @@ func TestReconnectDoesNotExecuteRetriedRequestTwice(t *testing.T) {
 	case <-secondDone:
 	case <-time.After(time.Second):
 		t.Fatal("second connection did not stop after cancellation")
+	}
+}
+
+func TestOversizedResultIsBoundedBeforeDeduplicationCache(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	executor := &fixedOutputExecutor{
+		output: strings.Repeat("sensitive-result", protocol.MaxFrameBytes),
+	}
+	client := lifecycleClient("https://control.example.com", workspace, executor)
+	client.leases.Add(lease.Lease{
+		ID:            "lease-01",
+		WorkspacePath: workspace,
+		ExpiresAt:     time.Now().Add(time.Hour),
+	})
+	message := testToolRequest("request-oversized")
+	state, first, err := client.beginToolRequest(context.Background(), message)
+	if err != nil || !first {
+		t.Fatalf("begin request: first=%v err=%v", first, err)
+	}
+	writer := &recordingFrameWriter{}
+	conn := &safeConn{ws: writer}
+	client.handleToolRequest(context.Background(), conn, message, state, first, nil)
+
+	if !state.completed || state.result.OK || state.result.ErrorCode != protocol.ErrExecution {
+		t.Fatalf("cached result was not bounded: %#v", state.result)
+	}
+	if executor.calls.Load() != 1 || len(writer.frames) != 1 {
+		t.Fatalf("first delivery: executor calls=%d writes=%d", executor.calls.Load(), len(writer.frames))
+	}
+	firstFrame := append([]byte(nil), writer.frames[0]...)
+
+	repeatedState, repeatedFirst, err := client.beginToolRequest(context.Background(), message)
+	if err != nil || repeatedFirst || repeatedState != state {
+		t.Fatalf("repeat request: first=%v same=%v err=%v", repeatedFirst, repeatedState == state, err)
+	}
+	client.handleToolRequest(
+		context.Background(),
+		conn,
+		message,
+		repeatedState,
+		repeatedFirst,
+		nil,
+	)
+	if executor.calls.Load() != 1 || len(writer.frames) != 2 || !bytes.Equal(firstFrame, writer.frames[1]) {
+		t.Fatalf("repeat delivery: executor calls=%d writes=%d", executor.calls.Load(), len(writer.frames))
 	}
 }

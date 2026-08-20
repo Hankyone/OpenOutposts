@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -96,8 +96,70 @@ describe("openPersistedSessionManager", () => {
 
     const reopened = await openPersistedSessionManager(sessionFile, dir);
     expect(reopened.recovered).toBe(false);
+    expect(reopened.resumed).toBe(true);
     expect(reopened.entryCount).toBeGreaterThan(0);
     expect(await readFile(sessionFile, "utf8")).toBe(first);
+    expect(await readdir(dirname(sessionFile))).toEqual(["sess_1.jsonl"]);
+  });
+
+  it("preserves and removes a torn byte tail before resuming the valid prefix", async () => {
+    const dir = await stateDir();
+    const sessionFile = join(dir, "pi-sessions", "sess_1.jsonl");
+    const first = await persistedSession(sessionFile);
+    first.session.sessionManager.appendMessage({
+      role: "user",
+      content: "message before the interrupted append",
+      timestamp: Date.now(),
+    });
+    const validPrefix = await readFile(sessionFile);
+    expect(validPrefix.at(-1)).toBe(0x0a);
+
+    const tornSuffix = Buffer.concat([
+      Buffer.from('{"torn-tail-canary":"'),
+      Buffer.alloc(70 * 1024, 0x78),
+      Buffer.from([0xf0, 0x9f]),
+    ]);
+    await appendFile(sessionFile, tornSuffix);
+
+    const reopened = await openPersistedSessionManager(sessionFile, dir);
+    expect(reopened.recovered).toBe(false);
+    expect(reopened.resumed).toBe(true);
+    reopened.manager.appendMessage({
+      role: "user",
+      content: "message after the interrupted append",
+      timestamp: Date.now(),
+    });
+
+    const repaired = await readFile(sessionFile);
+    expect(repaired.subarray(0, validPrefix.length)).toEqual(validPrefix);
+    const physicalLines = repaired
+      .toString("utf8")
+      .split("\n")
+      .filter((line) => line.length > 0);
+    for (const line of physicalLines) expect(() => JSON.parse(line)).not.toThrow();
+    expect(repaired.toString("utf8")).not.toContain("torn-tail-canary");
+    expect(repaired.toString("utf8")).toContain("message before the interrupted append");
+    expect(repaired.toString("utf8")).toContain("message after the interrupted append");
+
+    const files = await readdir(dirname(sessionFile));
+    const tailSidecars = files.filter((file) => file.startsWith("sess_1.jsonl.corrupt-tail-"));
+    expect(tailSidecars).toHaveLength(1);
+    const tailSidecar = join(dirname(sessionFile), tailSidecars[0]);
+    expect(await readFile(tailSidecar)).toEqual(tornSuffix);
+    expect((await stat(sessionFile)).mode & 0o777).toBe(0o600);
+    expect((await stat(tailSidecar)).mode & 0o777).toBe(0o600);
+    expect((await stat(dirname(sessionFile))).mode & 0o777).toBe(0o700);
+
+    const resumed = await openPersistedSessionManager(sessionFile, dir);
+    expect(resumed.recovered).toBe(false);
+    expect(resumed.resumed).toBe(true);
+    expect(resumed.messageCount).toBe(2);
+    expect(await readFile(sessionFile)).toEqual(repaired);
+    expect(
+      (await readdir(dirname(sessionFile))).filter((file) =>
+        file.startsWith("sess_1.jsonl.corrupt-tail-")
+      )
+    ).toEqual(tailSidecars);
   });
 
   /**
@@ -119,9 +181,10 @@ describe("openPersistedSessionManager", () => {
     const files = await readdir(dirname(sessionFile));
     const setAside = files.filter((file) => file.startsWith("sess_1.jsonl.corrupt-"));
     expect(setAside).toHaveLength(1);
-    expect(await readFile(join(dirname(sessionFile), setAside[0]), "utf8")).toBe(
-      "this is not a pi session at all\n"
-    );
+    const setAsidePath = join(dirname(sessionFile), setAside[0]);
+    expect(await readFile(setAsidePath, "utf8")).toBe("this is not a pi session at all\n");
+    expect((await stat(sessionFile)).mode & 0o777).toBe(0o600);
+    expect((await stat(setAsidePath)).mode & 0o777).toBe(0o600);
   });
 
   it("reports a conversation whose working directory no longer exists", async () => {
@@ -173,6 +236,17 @@ describe("a persisted outpost agent session", () => {
     expect(restarted.recovered).toBe(true);
     expect(restarted.resumed).toBe(false);
     expect(restarted.session.agent.state.messages).toHaveLength(0);
+    const files = await readdir(dirname(sessionFile));
+    const setAside = files.filter(
+      (file) =>
+        file.startsWith("sess_1.jsonl.corrupt-") && !file.startsWith("sess_1.jsonl.corrupt-tail-")
+    );
+    expect(setAside).toHaveLength(1);
+    const setAsidePath = join(dirname(sessionFile), setAside[0]);
+    expect(await readFile(setAsidePath)).toEqual(Buffer.from("{ half a line"));
+    expect((await stat(sessionFile)).mode & 0o777).toBe(0o600);
+    expect((await stat(setAsidePath)).mode & 0o777).toBe(0o600);
+    expect((await stat(dirname(sessionFile))).mode & 0o777).toBe(0o700);
   });
 
   /**

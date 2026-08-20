@@ -99,6 +99,7 @@ const SANDBOX_AUTH_ROUTES: RegExp[] = [
 /** Routes that require the session-specific sandbox token and reject internal HMAC auth. */
 const SANDBOX_AUTH_ONLY_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/commit-signing$/, // Public signing configuration and remote signer
+  /^\/sessions\/[^/]+\/startup-failure$/, // Exact-generation startup failure from the homestead
 ];
 
 /**
@@ -194,7 +195,7 @@ function isCredentialFetchAuthRoute(path: string): boolean {
  * control — the machine-only configuration this product makes first-class, and
  * therefore the one least likely to be exercised.
  */
-const OUTPOST_PATH_PATTERNS: RegExp[] = [/^\/outposts(?:\/.*)?$/, /^\/homesteads$/];
+const OUTPOST_PATH_PATTERNS: RegExp[] = [/^\/outposts(?:\/.*)?$/, /^\/homesteads(?:\/readiness)?$/];
 
 function isOutpostPath(path: string): boolean {
   return OUTPOST_PATH_PATTERNS.some((pattern) => pattern.test(path));
@@ -214,6 +215,7 @@ function isOutpostPath(path: string): boolean {
  */
 function isUserFacingOutpostRoute(path: string, method: string): boolean {
   if (method === "GET" && path === "/outposts") return true;
+  if (method === "GET" && path === "/homesteads/readiness") return true;
   if (method === "POST" && path === "/outposts/enrollments") return true;
   if (method === "GET" && /^\/outposts\/enrollments\/[^/]+$/.test(path)) return true;
   if (method === "POST" && /^\/outposts\/enrollments\/[^/]+\/confirm$/.test(path)) return true;
@@ -240,7 +242,9 @@ function isScmAgnosticRoute(path: string): boolean {
     /^\/provider-credentials(?:\/[^/]+)?$/.test(path) ||
     // The harness model catalog names no repository.
     path === "/model-catalog" ||
-    /^\/sessions\/[^/]+\/(tunnel-urls|commit-signing|model-credentials)$/.test(path) ||
+    /^\/sessions\/[^/]+\/(tunnel-urls|commit-signing|model-credentials|startup-failure)$/.test(
+      path
+    ) ||
     /^\/sessions\/[^/]+\/diff(?:\/.*)?$/.test(path)
   );
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { AgentHarness, HarnessEvent } from "./index.js";
-import { HarnessRegistry } from "./index.js";
+import type { AgentHarness, HarnessEvent, SessionHarnessFactory } from "./index.js";
+import { indexSessionHarnessFactories } from "./index.js";
 
 const piHarness: AgentHarness = {
   kind: "pi",
@@ -19,19 +19,28 @@ const piHarness: AgentHarness = {
   async close() {},
 };
 
-describe("HarnessRegistry", () => {
-  it("registers and resolves a harness", () => {
-    const registry = new HarnessRegistry();
-    registry.register(piHarness);
+const piFactory: SessionHarnessFactory = {
+  kind: "pi",
+  create: () => piHarness,
+};
 
-    expect(registry.get("pi")).toBe(piHarness);
-    expect(registry.list()).toEqual(["pi"]);
+describe("indexSessionHarnessFactories", () => {
+  it("indexes factories without constructing a shared harness", () => {
+    const factories = indexSessionHarnessFactories([piFactory]);
+
+    expect(factories.get("pi")).toBe(piFactory);
+    expect([...factories.keys()]).toEqual(["pi"]);
   });
 
-  it("rejects duplicate harnesses", () => {
-    const registry = new HarnessRegistry();
-    registry.register(piHarness);
+  it("rejects duplicate factories", () => {
+    expect(() => indexSessionHarnessFactories([piFactory, piFactory])).toThrow(
+      "duplicate session harness factory"
+    );
+  });
 
-    expect(() => registry.register(piHarness)).toThrow("Harness already registered");
+  it("rejects an empty production surface", () => {
+    expect(() => indexSessionHarnessFactories([])).toThrow(
+      "at least one session harness factory is required"
+    );
   });
 });

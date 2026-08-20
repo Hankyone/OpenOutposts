@@ -122,6 +122,7 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     type: z.literal("execution_complete"),
     success: z.boolean(),
     error: z.string().optional(),
+    truncated: truncatedForStorageSchema,
   }),
   sandboxEventBaseSchema.extend({
     type: z.literal("artifact"),

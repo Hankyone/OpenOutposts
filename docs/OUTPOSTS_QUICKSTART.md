@@ -181,8 +181,12 @@ file and shell operation happens on the outpost.
 ### Giving a session a key
 
 In production the session's owner stores their provider key once, encrypted, against their own
-account; every session they create resolves it. The web settings surface for that is not built yet,
-so on a local checkout the practical options are:
+account; every session they create resolves it. Open **Settings → Providers** in the web app, choose
+the provider, and add its API key. The key is write-only in the UI: it can be replaced or removed,
+but it is never displayed again after saving.
+
+For a local checkout that is being driven without the web settings page, the same two lower-level
+paths remain available:
 
 - Store it against your user directly through the control plane's credential routes
   (`PUT /provider-credentials/anthropic` with `{"apiKey":"sk-ant-..."}`, authenticated as the

@@ -7,13 +7,16 @@ import {
   type SessionAssign,
 } from "@openoutposts/outpost-protocol";
 
-import type { AgentHarness, HarnessSessionReference, TurnRequest } from "../index.js";
+import type { AgentHarness, HarnessEvent, HarnessSessionReference, TurnRequest } from "../index.js";
 import { BridgeTurnTranslator, type BridgeEvent } from "./bridge-events.js";
 import { shellQuote } from "./shell.js";
 
 const BRIDGE_HEARTBEAT_INTERVAL_MS = 30_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
+const TURN_SHUTDOWN_FAILURE =
+  "The homestead shut down while this turn was still running. The turn was interrupted and may not have completed.";
 // Sustained rejection means the product has put the session to sleep (or
 // ended it): stop holding the machine and go dormant. The product wakes a
 // dormant session by re-assigning it with fresh credentials.
@@ -118,10 +121,16 @@ export interface BridgeSessionOptions {
    */
   runWorkspaceCommand?: (
     command: string,
-    timeoutMs: number
+    timeoutMs: number,
+    signal?: AbortSignal
   ) => Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number }>;
   /** Requests a session diff capture (after turns and on refresh_diff). */
-  onDiffRefreshRequested?: (triggerMessageId: string | null) => void;
+  onDiffRefreshRequested?: (
+    triggerMessageId: string | null,
+    signal?: AbortSignal
+  ) => void | Promise<void>;
+  /** Called once when the bridge never establishes its first connection. */
+  onStartupFailure?: (error: string) => void | Promise<void>;
   log: (message: string, fields?: Record<string, unknown>) => void;
   onClosed: (productSessionId: string) => void;
 }
@@ -134,6 +143,19 @@ interface GitPushSpec {
   repoOwner?: string;
   repoName?: string;
   force?: boolean;
+}
+
+interface ActiveTurn {
+  readonly messageId: string;
+  readonly translator: BridgeTurnTranslator;
+  prompt: Promise<void>;
+  terminalSent: boolean;
+}
+
+interface ActiveSideWork {
+  readonly kind: string;
+  readonly controller: AbortController;
+  promise: Promise<void>;
 }
 
 /**
@@ -149,7 +171,12 @@ export class BridgeSession {
   #reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
   #consecutiveFailures = 0;
   #shuttingDown = false;
-  #promptActive = false;
+  #closed = false;
+  #activeTurn: ActiveTurn | null = null;
+  readonly #activeSideWork = new Set<ActiveSideWork>();
+  #shutdownPromise: Promise<void> | null = null;
+  #connectedOnce = false;
+  #startupFailureReported = false;
   readonly #pendingCritical = new Map<string, BridgeEvent>();
   /** Events produced while the socket was down, in the order they were made. */
   readonly #outbox: BridgeEvent[] = [];
@@ -169,20 +196,97 @@ export class BridgeSession {
     return this.#options.assignment.sandboxId;
   }
 
-  async shutdown(): Promise<void> {
-    if (this.#shuttingDown) return;
+  shutdown(): Promise<void> {
+    if (this.#shutdownPromise) return this.#shutdownPromise;
     this.#shuttingDown = true;
+    this.#shutdownPromise = this.#shutdown();
+    return this.#shutdownPromise;
+  }
+
+  async #shutdown(): Promise<void> {
     this.#stopHeartbeat();
-    // Nothing will reconnect to deliver these.
-    this.#outbox.length = 0;
-    this.#dropped = { count: 0, messageId: null };
+
+    const turn = this.#activeTurn;
+    const drains: Promise<void>[] = [];
+    if (turn) {
+      const interrupt = this.#settleShutdownWork(
+        () => this.#options.harness.interrupt(this.#options.harnessSession),
+        "turn interrupt"
+      );
+      const prompt = turn.prompt.catch((error: unknown) => {
+        this.#options.log("prompt drain failed during bridge shutdown", {
+          session: this.#options.assignment.productSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+      drains.push(interrupt, prompt);
+    }
+
+    const sideWork = [...this.#activeSideWork];
+    for (const work of sideWork) {
+      work.controller.abort();
+      drains.push(work.promise);
+    }
+
+    if (drains.length > 0) {
+      const drained = Promise.all(drains);
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const outcome = await Promise.race([
+        drained.then(() => "drained" as const),
+        new Promise<"timed-out">((resolve) => {
+          timer = setTimeout(() => resolve("timed-out"), SHUTDOWN_DRAIN_TIMEOUT_MS);
+        }),
+      ]);
+      if (timer !== null) clearTimeout(timer);
+      if (outcome === "timed-out") {
+        this.#options.log("work drain timed out during bridge shutdown", {
+          session: this.#options.assignment.productSessionId,
+          ...(turn === null ? {} : { message_id: turn.messageId }),
+          side_work: sideWork.map((work) => work.kind),
+          timeout_ms: SHUTDOWN_DRAIN_TIMEOUT_MS,
+        });
+      }
+    }
+    if (turn && !turn.terminalSent) {
+      this.#translateTurnEvent(turn, { type: "turn.failed", message: TURN_SHUTDOWN_FAILURE });
+    }
+
+    // Keep the socket open while the terminal event is delivered, then make
+    // every late event from a timed-out prompt inert before closing it.
+    this.#closed = true;
     try {
       this.#ws?.close(1000, "homestead shutting down");
     } catch {
       // socket may already be closed
     }
-    await this.#options.harness.close(this.#options.harnessSession).catch(() => {});
-    this.#options.onClosed(this.#options.assignment.productSessionId);
+    // Nothing will reconnect to deliver these.
+    this.#outbox.length = 0;
+    this.#dropped = { count: 0, messageId: null };
+    try {
+      await this.#options.harness.close(this.#options.harnessSession).catch((error: unknown) => {
+        this.#options.log("harness close failed during bridge shutdown", {
+          session: this.#options.assignment.productSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    } finally {
+      this.#options.onClosed(this.#options.assignment.productSessionId);
+    }
+  }
+
+  #settleShutdownWork(work: () => Promise<void>, description: string): Promise<void> {
+    let started: Promise<void>;
+    try {
+      started = work();
+    } catch (error) {
+      started = Promise.reject(error);
+    }
+    return started.catch((error: unknown) => {
+      this.#options.log(`${description} failed during bridge shutdown`, {
+        session: this.#options.assignment.productSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   #connect(): void {
@@ -199,6 +303,7 @@ export class BridgeSession {
     this.#ws = ws;
 
     ws.addEventListener("open", () => {
+      this.#connectedOnce = true;
       this.#reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
       this.#consecutiveFailures = 0;
       this.#options.log("bridge connected", {
@@ -249,6 +354,13 @@ export class BridgeSession {
         event.code === 1008 ||
         this.#consecutiveFailures >= MAX_CONSECUTIVE_RECONNECT_FAILURES
       ) {
+        if (!this.#connectedOnce) {
+          const error =
+            this.#consecutiveFailures >= MAX_CONSECUTIVE_RECONNECT_FAILURES
+              ? `Session bridge failed to start after ${this.#consecutiveFailures} connection attempts`
+              : `Session bridge failed to start: the control plane closed the connection with code ${event.code}`;
+          this.#reportStartupFailure(error);
+        }
         this.#options.log("bridge unreachable; session going dormant", {
           session: assignment.productSessionId,
           code: event.code,
@@ -273,6 +385,19 @@ export class BridgeSession {
     });
   }
 
+  #reportStartupFailure(error: string): void {
+    if (this.#startupFailureReported) return;
+    this.#startupFailureReported = true;
+    Promise.resolve()
+      .then(() => this.#options.onStartupFailure?.(error))
+      .catch((reportError: unknown) => {
+        this.#options.log("bridge startup failure could not be reported", {
+          session: this.#options.assignment.productSessionId,
+          error: reportError instanceof Error ? reportError.message : String(reportError),
+        });
+      });
+  }
+
   async #handleCommand(command: Record<string, unknown>): Promise<void> {
     switch (command.type) {
       case "prompt":
@@ -289,17 +414,21 @@ export class BridgeSession {
         return;
       }
       case "push":
-        await this.#handlePush(command.pushSpec as unknown as GitPushSpec);
+        await this.#runSideWork("push", (signal) =>
+          this.#handlePush(command.pushSpec as unknown as GitPushSpec, signal)
+        );
         return;
       case "refresh_diff":
-        this.#options.onDiffRefreshRequested?.(null);
+        await this.#runSideWork("requested diff capture", async (signal) => {
+          await this.#options.onDiffRefreshRequested?.(null, signal);
+        });
         return;
       default:
         return;
     }
   }
 
-  async #handlePush(spec: GitPushSpec | undefined): Promise<void> {
+  async #handlePush(spec: GitPushSpec | undefined, signal: AbortSignal): Promise<void> {
     const identity = {
       branchName: spec?.targetBranch ?? "unknown",
       ...(spec?.repoOwner ? { repoOwner: spec.repoOwner } : {}),
@@ -327,7 +456,8 @@ export class BridgeSession {
     try {
       const result = await run(
         `git push ${spec.force ? "--force " : ""}-- ${shellQuote(spec.remoteUrl)} ${shellQuote(spec.refspec)}`,
-        180_000
+        180_000,
+        signal
       );
       if (!result.ok || result.exitCode !== 0) {
         // The remote URL may embed a brokered token — redact before surfacing.
@@ -361,47 +491,108 @@ export class BridgeSession {
       });
       return;
     }
-    if (this.#promptActive) {
+    if (this.#shuttingDown) {
+      this.#options.log("prompt arrived while bridge is shutting down; ignoring", {
+        session: this.#options.assignment.productSessionId,
+        message_id: messageId,
+      });
+      return;
+    }
+    if (this.#activeTurn) {
       this.#options.log("prompt arrived while another is active; ignoring", {
         session: this.#options.assignment.productSessionId,
         message_id: messageId,
       });
       return;
     }
-    this.#promptActive = true;
-    const translator = new BridgeTurnTranslator(messageId);
-    const fail = (message: string): void => {
-      for (const event of translator.translate({ type: "turn.failed", message })) {
-        this.#send(event);
-      }
+    const turn: ActiveTurn = {
+      messageId,
+      translator: new BridgeTurnTranslator(messageId),
+      prompt: Promise.resolve(),
+      terminalSent: false,
     };
+    this.#activeTurn = turn;
+    turn.prompt = this.#consumePrompt(turn, command);
     try {
-      for (const event of translator.start()) this.#send(event);
+      await turn.prompt;
+    } finally {
+      if (this.#activeTurn === turn) this.#activeTurn = null;
+      await this.#runSideWork("post-turn diff capture", async (signal) => {
+        await this.#options.onDiffRefreshRequested?.(messageId, signal);
+      });
+    }
+  }
+
+  #runSideWork(kind: string, run: (signal: AbortSignal) => void | Promise<void>): Promise<void> {
+    if (this.#shuttingDown) return Promise.resolve();
+    const work: ActiveSideWork = {
+      kind,
+      controller: new AbortController(),
+      promise: Promise.resolve(),
+    };
+    this.#activeSideWork.add(work);
+    let started: void | Promise<void>;
+    try {
+      started = run(work.controller.signal);
+    } catch (error) {
+      started = Promise.reject(error);
+    }
+    work.promise = Promise.resolve(started)
+      .catch((error: unknown) => {
+        this.#options.log(`${kind} failed`, {
+          session: this.#options.assignment.productSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        this.#activeSideWork.delete(work);
+      });
+    return work.promise;
+  }
+
+  async #consumePrompt(turn: ActiveTurn, command: Record<string, unknown>): Promise<void> {
+    try {
+      this.#sendTurnEvents(turn, turn.translator.start());
       const read = readTurnRequest(command);
       if ("refusal" in read) {
         this.#options.log("prompt refused", {
           session: this.#options.assignment.productSessionId,
-          message_id: messageId,
+          message_id: turn.messageId,
           reason: read.refusal,
         });
-        fail(read.refusal);
+        this.#translateTurnEvent(turn, { type: "turn.failed", message: read.refusal });
         return;
       }
       for await (const harnessEvent of this.#options.harness.sendPrompt(
         this.#options.harnessSession,
         read.turn
       )) {
-        for (const event of translator.translate(harnessEvent)) this.#send(event);
+        this.#translateTurnEvent(turn, harnessEvent);
       }
     } catch (error) {
-      fail(error instanceof Error ? error.message : String(error));
-    } finally {
-      this.#promptActive = false;
-      this.#options.onDiffRefreshRequested?.(messageId);
+      this.#translateTurnEvent(turn, {
+        type: "turn.failed",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  #translateTurnEvent(turn: ActiveTurn, event: HarnessEvent): void {
+    if (turn.terminalSent || this.#closed) return;
+    this.#sendTurnEvents(turn, turn.translator.translate(event));
+  }
+
+  #sendTurnEvents(turn: ActiveTurn, events: BridgeEvent[]): void {
+    if (turn.terminalSent || this.#closed) return;
+    for (const event of events) {
+      if (event.type === "execution_complete") turn.terminalSent = true;
+      this.#send(event);
+      if (turn.terminalSent) return;
     }
   }
 
   #send(event: BridgeEvent): void {
+    if (this.#closed) return;
     const enriched: BridgeEvent = {
       ...event,
       sandboxId: this.#options.assignment.sandboxId,

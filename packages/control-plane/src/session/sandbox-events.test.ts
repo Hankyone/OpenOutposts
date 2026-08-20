@@ -5,7 +5,7 @@ import type { SandboxEvent, ServerMessage } from "../types";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SessionDiffService } from "./diffs/service";
 import type { SessionRepository } from "./repository";
-import { DEFAULT_EVENT_RETENTION } from "./event-persistence";
+import { DEFAULT_EVENT_RETENTION, storedEventByteLength } from "./event-persistence";
 import type { SessionStatusService } from "./session-status-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
 
@@ -100,6 +100,7 @@ function createProcessor(retention = DEFAULT_EVENT_RETENTION) {
     updateLastActivity,
     applySessionTitleUpdate,
     waitUntil,
+    log,
   };
 }
 
@@ -844,6 +845,104 @@ describe("SessionSandboxEventProcessor", () => {
       ];
       expect(stored.truncated).toBe(true);
       expect(stored.content).toContain("truncated for storage");
+    });
+
+    it("bounds an authoritative completion while broadcasting the original", async () => {
+      const h = createProcessor(tinyRetention);
+      h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+      h.repository.getMessageTimestamps.mockReturnValue({ created_at: 1000, started_at: 1100 });
+      const event: SandboxEvent = {
+        type: "execution_complete",
+        messageId: "msg-1",
+        success: false,
+        error: `full-error-${"E".repeat(5000)}`,
+        sandboxId: "sb-1",
+        timestamp: 2000,
+      };
+
+      await h.processor.processSandboxEvent(event);
+
+      const stored = h.repository.upsertExecutionCompleteEvent.mock.calls[0][1] as Extract<
+        SandboxEvent,
+        { type: "execution_complete" }
+      > & { truncated?: boolean };
+      expect(stored.truncated).toBe(true);
+      expect(stored.error).toContain("truncated for storage");
+      expect(storedEventByteLength(stored)).toBeLessThanOrEqual(400);
+
+      const live = h.broadcast.mock.calls.find(
+        ([message]) => message.type === "sandbox_event"
+      )?.[0] as { type: "sandbox_event"; event: SandboxEvent } | undefined;
+      expect(live?.event).toBe(event);
+      expect((live?.event as Extract<SandboxEvent, { type: "execution_complete" }>).error).toBe(
+        event.error
+      );
+    });
+
+    it("bounds a late completion without changing its existing broadcast behavior", async () => {
+      const h = createProcessor(tinyRetention);
+      h.repository.getProcessingMessage.mockReturnValue(null);
+      const event: SandboxEvent = {
+        type: "execution_complete",
+        messageId: "msg-1",
+        success: false,
+        error: `late-error-${"E".repeat(5000)}`,
+        sandboxId: "sb-1",
+        timestamp: 2000,
+      };
+
+      await h.processor.processSandboxEvent(event);
+
+      const stored = h.repository.recordExecutionCompleteEventIfAbsent.mock.calls[0][1] as Extract<
+        SandboxEvent,
+        { type: "execution_complete" }
+      > & { truncated?: boolean };
+      expect(stored.truncated).toBe(true);
+      expect(stored.error).toContain("truncated for storage");
+      expect(storedEventByteLength(stored)).toBeLessThanOrEqual(400);
+      expect(h.repository.upsertExecutionCompleteEvent).not.toHaveBeenCalled();
+      expect(h.broadcast).not.toHaveBeenCalledWith({ type: "sandbox_event", event });
+    });
+
+    it("skips an impossible completion copy without skipping live completion work", async () => {
+      const h = createProcessor({ ...tinyRetention, eventPayloadMaxBytes: 8 });
+      const sandboxWs = {} as WebSocket;
+      h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+      h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+      h.repository.getMessageTimestamps.mockReturnValue({ created_at: 1000, started_at: 1100 });
+      const event: SandboxEvent = {
+        type: "execution_complete",
+        messageId: "msg-1",
+        success: false,
+        error: "failure",
+        sandboxId: "sb-1",
+        timestamp: 2000,
+        ackId: "execution_complete:msg-1",
+      };
+
+      await h.processor.processSandboxEvent(event);
+
+      expect(h.repository.upsertExecutionCompleteEvent).not.toHaveBeenCalled();
+      expect(h.repository.recordExecutionCompleteEventIfAbsent).not.toHaveBeenCalled();
+      expect(h.repository.updateMessageCompletion).toHaveBeenCalledWith(
+        "msg-1",
+        "failed",
+        expect.any(Number)
+      );
+      expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
+      expect(h.callbackService.notifyComplete).toHaveBeenCalledWith("msg-1", false, "failure");
+      expect(h.statusService.reconcileAfterExecution).toHaveBeenCalledWith(false);
+      expect(h.scheduleInactivityCheck).toHaveBeenCalledOnce();
+      expect(h.processMessageQueue).toHaveBeenCalledOnce();
+      expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, {
+        type: "ack",
+        ackId: "execution_complete:msg-1",
+      });
+      expect(h.log.warn).toHaveBeenCalledWith("session.event_storage_skipped", {
+        event_type: "execution_complete",
+        message_id: "msg-1",
+        event_payload_max_bytes: 8,
+      });
     });
 
     it("leaves an event that fits exactly as it arrived", async () => {

@@ -1,7 +1,6 @@
 package ops
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,15 +11,32 @@ import (
 	"github.com/Hankyone/OpenOutposts/packages/outpost-worker/internal/protocol"
 )
 
-// encodedLen reports how many bytes a value occupies once wsjson has written
-// it, which is the size the control plane measures against its frame limit.
+// encodedLen reports the exact bytes the worker's final frame encoder writes.
 func encodedLen(t *testing.T, value any) int {
 	t.Helper()
-	var buffer bytes.Buffer
-	if err := json.NewEncoder(&buffer).Encode(value); err != nil {
+	encoded, err := json.Marshal(value)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return buffer.Len()
+	return len(encoded)
+}
+
+func requireOperationFitsFrame(t *testing.T, output any) {
+	t.Helper()
+	if size := encodedLen(t, output); size > protocol.MaxToolOutputBytes {
+		t.Fatalf("encoded operation result is %d bytes, above %d", size, protocol.MaxToolOutputBytes)
+	}
+	frame := protocol.ToolResult{
+		Type:            "tool.result",
+		ProtocolVersion: protocol.Version,
+		RequestID:       strings.Repeat("&", 200),
+		LeaseID:         strings.Repeat("<", 200),
+		OK:              true,
+		Output:          output,
+	}
+	if size := encodedLen(t, frame); size > protocol.MaxFrameBytes {
+		t.Fatalf("complete encoded tool result is %d bytes, above %d", size, protocol.MaxFrameBytes)
+	}
 }
 
 func TestBashOutputCapIsMeasuredInWireBytes(t *testing.T) {
@@ -243,4 +259,103 @@ func TestReadCapsContentAtTheOutputLimit(t *testing.T) {
 	if !read.Truncated || read.TotalLines != 1 {
 		t.Fatalf("unexpected read result: truncated=%v totalLines=%d", read.Truncated, read.TotalLines)
 	}
+}
+
+func TestReadBoundsEscapedContentByEncodedBytes(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "binary.dat")
+	if err := os.WriteFile(path, make([]byte, maxReadBytes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := execute(t, workspace, "read", map[string]any{"path": "binary.dat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := result.(readResult)
+	if !read.Truncated || len(read.Content) >= maxReadBytes {
+		t.Fatalf("escaped read was not byte-limited: bytes=%d truncated=%v", len(read.Content), read.Truncated)
+	}
+	requireOperationFitsFrame(t, read)
+}
+
+func TestGrepBoundsCompleteMatchesByEncodedBytes(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	text := strings.Repeat("&", maxGrepLineChars)
+	for index := 0; index < 320; index++ {
+		name := strconv.Itoa(1000+index) + strings.Repeat("&", 180) + ".txt"
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(text+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := execute(t, workspace, "grep", map[string]any{
+		"pattern":    "&",
+		"maxMatches": 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grep := result.(grepResult)
+	if !grep.Truncated || len(grep.Matches) == 0 || len(grep.Matches) >= 320 {
+		t.Fatalf("grep matches=%d truncated=%v", len(grep.Matches), grep.Truncated)
+	}
+	for _, match := range grep.Matches {
+		if len(match.Text) != maxGrepLineChars {
+			t.Fatal("grep returned a partial match")
+		}
+	}
+	requireOperationFitsFrame(t, grep)
+}
+
+func TestFindBoundsCompletePathsByEncodedBytes(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	for index := 0; index < 1000; index++ {
+		name := strconv.Itoa(1000+index) + strings.Repeat("&", 180) + ".txt"
+		if err := os.WriteFile(filepath.Join(workspace, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := execute(t, workspace, "find", map[string]any{
+		"glob":       "*.txt",
+		"maxResults": 5000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	find := result.(findResult)
+	if !find.Truncated || len(find.Paths) == 0 || len(find.Paths) >= 1000 {
+		t.Fatalf("find paths=%d truncated=%v", len(find.Paths), find.Truncated)
+	}
+	requireOperationFitsFrame(t, find)
+}
+
+func TestLsBoundsCompleteEntriesByEncodedBytes(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	for index := 0; index < maxLsEntries; index++ {
+		name := strconv.Itoa(1000+index) + strings.Repeat("&", 180) + ".txt"
+		if err := os.WriteFile(filepath.Join(workspace, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := execute(t, workspace, "ls", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing := result.(lsResult)
+	if !listing.Truncated || len(listing.Entries) == 0 || len(listing.Entries) >= maxLsEntries {
+		t.Fatalf("ls entries=%d truncated=%v", len(listing.Entries), listing.Truncated)
+	}
+	for index := 1; index < len(listing.Entries); index++ {
+		if listing.Entries[index-1].Name >= listing.Entries[index].Name {
+			t.Fatal("byte-limited listing lost sorted order")
+		}
+	}
+	requireOperationFitsFrame(t, listing)
 }

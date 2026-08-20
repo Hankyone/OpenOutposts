@@ -1,0 +1,571 @@
+{
+  "fixtureVersion": 1,
+  "description": "Deterministic cross-language OpenOutposts v5 wire contract. Regenerate with `python3 packages/outpost-protocol/test-fixtures/generators/generate_outpost_wire_vectors.py`.",
+  "protocolVersion": 5,
+  "messages": [
+    {
+      "name": "worker registration with every capability",
+      "direction": "workerToControl",
+      "goType": "Registration",
+      "message": {
+        "type": "outpost.register",
+        "protocolVersion": 5,
+        "outpostId": "workstation-01",
+        "name": "Test workstation",
+        "workerVersion": "1.2.3-test",
+        "capabilities": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "operations": ["bash", "read", "write", "edit", "grep", "find", "ls"],
+          "workspaceRoots": ["/srv/openoutposts/workspaces", "/srv/openoutposts/repositories"]
+        }
+      }
+    },
+    {
+      "name": "worker heartbeat",
+      "direction": "workerToControl",
+      "goType": "Heartbeat",
+      "message": {
+        "type": "outpost.heartbeat",
+        "protocolVersion": 5,
+        "outpostId": "workstation-01",
+        "sentAt": "2026-08-18T12:34:56Z"
+      }
+    },
+    {
+      "name": "lease accepted",
+      "direction": "workerToControl",
+      "goType": "LeaseAccepted",
+      "message": {
+        "type": "lease.accepted",
+        "protocolVersion": 5,
+        "leaseId": "lease-001"
+      }
+    },
+    {
+      "name": "lease rejected with reason",
+      "direction": "workerToControl",
+      "goType": "LeaseRejected",
+      "message": {
+        "type": "lease.rejected",
+        "protocolVersion": 5,
+        "leaseId": "lease-rejected",
+        "reason": "workspace path is outside the configured roots"
+      }
+    },
+    {
+      "name": "successful context result",
+      "direction": "workerToControl",
+      "goType": "ContextResult",
+      "message": {
+        "type": "context.result",
+        "protocolVersion": 5,
+        "requestId": "request-context",
+        "leaseId": "lease-001",
+        "ok": true,
+        "files": [
+          {
+            "path": "AGENTS.md",
+            "content": "Use UTF-8. Preserve \"quotes\" and C:\\paths.\n"
+          },
+          {
+            "path": "src/AGENTS.md",
+            "content": "Répondre clairement.\n"
+          }
+        ]
+      }
+    },
+    {
+      "name": "registered acknowledgement with every field",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "outpost.registered",
+        "protocolVersion": 5,
+        "outpostId": "workstation-01",
+        "connectionId": "connection-001",
+        "registeredAt": "2026-08-18T12:35:00Z",
+        "heartbeatIntervalMs": 15000
+      }
+    },
+    {
+      "name": "heartbeat acknowledgement",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "outpost.heartbeat_ack",
+        "protocolVersion": 5,
+        "outpostId": "workstation-01",
+        "receivedAt": "2026-08-18T12:35:15Z"
+      }
+    },
+    {
+      "name": "control plane error",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "outpost.error",
+        "protocolVersion": 5,
+        "code": "unsupported_message",
+        "message": "unsupported message: \\\"future.type\\\""
+      }
+    },
+    {
+      "name": "lease offer with offset timestamp and spaced workspace",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "lease.offer",
+        "protocolVersion": 5,
+        "leaseId": "lease-001",
+        "productSessionId": "session-001",
+        "workspacePath": "/srv/openoutposts/workspaces/project with spaces",
+        "expiresAt": "2026-08-18T15:30:00+02:00"
+      }
+    },
+    {
+      "name": "lease release",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "lease.release",
+        "protocolVersion": 5,
+        "leaseId": "lease-001",
+        "reason": "moved"
+      }
+    },
+    {
+      "name": "lease-wide tool cancellation",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.cancel",
+        "protocolVersion": 5,
+        "leaseId": "lease-001"
+      }
+    },
+    {
+      "name": "request-scoped tool cancellation",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.cancel",
+        "protocolVersion": 5,
+        "leaseId": "lease-001",
+        "requestId": "request-bash"
+      }
+    },
+    {
+      "name": "context request",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "context.request",
+        "protocolVersion": 5,
+        "requestId": "request-context",
+        "leaseId": "lease-001"
+      }
+    },
+    {
+      "name": "bash tool request",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.request",
+        "protocolVersion": 5,
+        "requestId": "request-bash",
+        "leaseId": "lease-001",
+        "operation": "bash",
+        "input": {
+          "command": "printf 'héllo \"wire\"\\n'",
+          "cwd": "project dir",
+          "timeoutMs": 4250
+        }
+      }
+    },
+    {
+      "name": "successful bash tool result",
+      "direction": "workerToControl",
+      "goType": "ToolResult",
+      "message": {
+        "type": "tool.result",
+        "protocolVersion": 5,
+        "requestId": "request-bash",
+        "leaseId": "lease-001",
+        "ok": true,
+        "output": {
+          "stdout": "héllo \"wire\"\n",
+          "stderr": "warning: C:\\temp\n",
+          "exitCode": 0,
+          "durationMs": 127,
+          "truncated": false
+        }
+      }
+    },
+    {
+      "name": "read tool request",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.request",
+        "protocolVersion": 5,
+        "requestId": "request-read",
+        "leaseId": "lease-001",
+        "operation": "read",
+        "input": {
+          "path": "src/naïve \"file\".txt",
+          "offsetLines": 2,
+          "limitLines": 40
+        }
+      }
+    },
+    {
+      "name": "successful read tool result",
+      "direction": "workerToControl",
+      "goType": "ToolResult",
+      "message": {
+        "type": "tool.result",
+        "protocolVersion": 5,
+        "requestId": "request-read",
+        "leaseId": "lease-001",
+        "ok": true,
+        "output": {
+          "content": "first \"quoted\"\nsecond \\ path\ncafé",
+          "totalLines": 12,
+          "truncated": true
+        }
+      }
+    },
+    {
+      "name": "write tool request",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.request",
+        "protocolVersion": 5,
+        "requestId": "request-write",
+        "leaseId": "lease-001",
+        "operation": "write",
+        "input": {
+          "path": "notes/こんにちは.txt",
+          "content": "\"quoted\"\nC:\\workspace\\file\n"
+        }
+      }
+    },
+    {
+      "name": "successful write tool result",
+      "direction": "workerToControl",
+      "goType": "ToolResult",
+      "message": {
+        "type": "tool.result",
+        "protocolVersion": 5,
+        "requestId": "request-write",
+        "leaseId": "lease-001",
+        "ok": true,
+        "output": {
+          "bytesWritten": 27,
+          "created": true
+        }
+      }
+    },
+    {
+      "name": "edit tool request",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.request",
+        "protocolVersion": 5,
+        "requestId": "request-edit",
+        "leaseId": "lease-001",
+        "operation": "edit",
+        "input": {
+          "path": "src/message.ts",
+          "oldString": "hello\nworld",
+          "newString": "bonjour\n世界",
+          "replaceAll": true
+        }
+      }
+    },
+    {
+      "name": "successful edit tool result",
+      "direction": "workerToControl",
+      "goType": "ToolResult",
+      "message": {
+        "type": "tool.result",
+        "protocolVersion": 5,
+        "requestId": "request-edit",
+        "leaseId": "lease-001",
+        "ok": true,
+        "output": {
+          "replacements": 3
+        }
+      }
+    },
+    {
+      "name": "grep tool request",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.request",
+        "protocolVersion": 5,
+        "requestId": "request-grep",
+        "leaseId": "lease-001",
+        "operation": "grep",
+        "input": {
+          "pattern": "TODO\\(\"café\"\\)",
+          "path": "src",
+          "maxMatches": 25
+        }
+      }
+    },
+    {
+      "name": "successful grep tool result",
+      "direction": "workerToControl",
+      "goType": "ToolResult",
+      "message": {
+        "type": "tool.result",
+        "protocolVersion": 5,
+        "requestId": "request-grep",
+        "leaseId": "lease-001",
+        "ok": true,
+        "output": {
+          "matches": [
+            {
+              "path": "src/café.ts",
+              "line": 27,
+              "text": "TODO(\"café\") \\ check"
+            }
+          ],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "name": "find tool request",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.request",
+        "protocolVersion": 5,
+        "requestId": "request-find",
+        "leaseId": "lease-001",
+        "operation": "find",
+        "input": {
+          "glob": "src/**/*.{ts,tsx}",
+          "maxResults": 250
+        }
+      }
+    },
+    {
+      "name": "successful find tool result",
+      "direction": "workerToControl",
+      "goType": "ToolResult",
+      "message": {
+        "type": "tool.result",
+        "protocolVersion": 5,
+        "requestId": "request-find",
+        "leaseId": "lease-001",
+        "ok": true,
+        "output": {
+          "paths": ["src/index.ts", "src/界面/panel.tsx"],
+          "truncated": false
+        }
+      }
+    },
+    {
+      "name": "ls tool request",
+      "direction": "controlToWorker",
+      "goType": "ServerMessage",
+      "message": {
+        "type": "tool.request",
+        "protocolVersion": 5,
+        "requestId": "request-ls",
+        "leaseId": "lease-001",
+        "operation": "ls",
+        "input": {
+          "path": "build output"
+        }
+      }
+    },
+    {
+      "name": "successful ls tool result",
+      "direction": "workerToControl",
+      "goType": "ToolResult",
+      "message": {
+        "type": "tool.result",
+        "protocolVersion": 5,
+        "requestId": "request-ls",
+        "leaseId": "lease-001",
+        "ok": true,
+        "output": {
+          "entries": [
+            {
+              "name": "artifact.bin",
+              "type": "file",
+              "sizeBytes": 12345
+            },
+            {
+              "name": "assets",
+              "type": "dir"
+            },
+            {
+              "name": "current",
+              "type": "symlink"
+            },
+            {
+              "name": "socket",
+              "type": "other"
+            }
+          ],
+          "truncated": true
+        }
+      }
+    },
+    {
+      "name": "failed tool result",
+      "direction": "workerToControl",
+      "goType": "ToolResult",
+      "message": {
+        "type": "tool.result",
+        "protocolVersion": 5,
+        "requestId": "request-failed",
+        "leaseId": "lease-001",
+        "ok": false,
+        "output": null,
+        "error": "operation timed out after 4250ms",
+        "errorCode": "timeout"
+      }
+    }
+  ],
+  "toolPayloads": [
+    {
+      "name": "bash with cwd, timeout, escaping, and unicode",
+      "operation": "bash",
+      "requestMessageName": "bash tool request",
+      "resultMessageName": "successful bash tool result",
+      "input": {
+        "command": "printf 'héllo \"wire\"\\n'",
+        "cwd": "project dir",
+        "timeoutMs": 4250
+      },
+      "result": {
+        "stdout": "héllo \"wire\"\n",
+        "stderr": "warning: C:\\temp\n",
+        "exitCode": 0,
+        "durationMs": 127,
+        "truncated": false
+      }
+    },
+    {
+      "name": "read with line window and complex content",
+      "operation": "read",
+      "requestMessageName": "read tool request",
+      "resultMessageName": "successful read tool result",
+      "input": {
+        "path": "src/naïve \"file\".txt",
+        "offsetLines": 2,
+        "limitLines": 40
+      },
+      "result": {
+        "content": "first \"quoted\"\nsecond \\ path\ncafé",
+        "totalLines": 12,
+        "truncated": true
+      }
+    },
+    {
+      "name": "write with unicode path and multiline content",
+      "operation": "write",
+      "requestMessageName": "write tool request",
+      "resultMessageName": "successful write tool result",
+      "input": {
+        "path": "notes/こんにちは.txt",
+        "content": "\"quoted\"\nC:\\workspace\\file\n"
+      },
+      "result": {
+        "bytesWritten": 27,
+        "created": true
+      }
+    },
+    {
+      "name": "edit with replace all",
+      "operation": "edit",
+      "requestMessageName": "edit tool request",
+      "resultMessageName": "successful edit tool result",
+      "input": {
+        "path": "src/message.ts",
+        "oldString": "hello\nworld",
+        "newString": "bonjour\n世界",
+        "replaceAll": true
+      },
+      "result": {
+        "replacements": 3
+      }
+    },
+    {
+      "name": "grep with path and match limit",
+      "operation": "grep",
+      "requestMessageName": "grep tool request",
+      "resultMessageName": "successful grep tool result",
+      "input": {
+        "pattern": "TODO\\(\"café\"\\)",
+        "path": "src",
+        "maxMatches": 25
+      },
+      "result": {
+        "matches": [
+          {
+            "path": "src/café.ts",
+            "line": 27,
+            "text": "TODO(\"café\") \\ check"
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "name": "find with result limit",
+      "operation": "find",
+      "requestMessageName": "find tool request",
+      "resultMessageName": "successful find tool result",
+      "input": {
+        "glob": "src/**/*.{ts,tsx}",
+        "maxResults": 250
+      },
+      "result": {
+        "paths": ["src/index.ts", "src/界面/panel.tsx"],
+        "truncated": false
+      }
+    },
+    {
+      "name": "ls with every entry kind and truncation",
+      "operation": "ls",
+      "requestMessageName": "ls tool request",
+      "resultMessageName": "successful ls tool result",
+      "input": {
+        "path": "build output"
+      },
+      "result": {
+        "entries": [
+          {
+            "name": "artifact.bin",
+            "type": "file",
+            "sizeBytes": 12345
+          },
+          {
+            "name": "assets",
+            "type": "dir"
+          },
+          {
+            "name": "current",
+            "type": "symlink"
+          },
+          {
+            "name": "socket",
+            "type": "other"
+          }
+        ],
+        "truncated": true
+      }
+    }
+  ]
+}

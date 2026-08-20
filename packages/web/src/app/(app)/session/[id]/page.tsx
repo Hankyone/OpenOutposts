@@ -66,6 +66,7 @@ function SessionPageContent() {
     replaying,
     authError,
     connectionError,
+    startupError,
     sessionState,
     events,
     participants,
@@ -256,6 +257,15 @@ function SessionPageContent() {
         }}
         renameSession={renameSession}
       />
+
+      {startupError && (
+        <div
+          role="alert"
+          className="border-b border-destructive-border bg-destructive-muted px-4 py-3 text-sm text-destructive"
+        >
+          <span className="font-medium">Startup failed.</span> {startupError}
+        </div>
+      )}
 
       {/* Connection error banner */}
       {(authError || connectionError) && (

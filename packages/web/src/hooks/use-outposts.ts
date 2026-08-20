@@ -67,6 +67,9 @@ export interface OutpostBoundSession {
 
 interface ListBoundSessionsResponse {
   sessions: OutpostBoundSession[];
+  /** Live Durable Object status, unlike the advisory fleet directory row. */
+  connected?: boolean;
+  lastHeartbeatAt?: string | null;
 }
 
 /**
@@ -79,6 +82,8 @@ interface ListBoundSessionsResponse {
  */
 export function useOutpostBoundSessions(outpostId: string | null): {
   sessions: OutpostBoundSession[];
+  connected: boolean | null;
+  lastHeartbeatAt: string | null;
   loading: boolean;
   unavailable: boolean;
 } {
@@ -91,6 +96,8 @@ export function useOutpostBoundSessions(outpostId: string | null): {
 
   return {
     sessions: data?.sessions ?? [],
+    connected: data?.connected ?? null,
+    lastHeartbeatAt: data?.lastHeartbeatAt ?? null,
     loading: isLoading,
     unavailable: Boolean(error),
   };

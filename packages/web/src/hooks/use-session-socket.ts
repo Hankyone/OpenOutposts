@@ -41,6 +41,7 @@ interface UseSessionSocketReturn {
   replaying: boolean;
   authError: string | null;
   connectionError: string | null;
+  startupError: string | null;
   sessionState: SessionState | null;
   messages: Message[];
   events: SandboxEvent[];
@@ -273,6 +274,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
     replaying: state.replaying,
     authError: transport.authError,
     connectionError: transport.connectionError,
+    startupError: state.startupError,
     sessionState: state.sessionState,
     messages: NO_MESSAGES,
     events: state.events,

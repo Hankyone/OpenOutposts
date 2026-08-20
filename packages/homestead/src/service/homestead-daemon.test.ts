@@ -17,15 +17,19 @@ import {
   resolveMaxSessions,
   type HomesteadDaemonOptions,
 } from "./homestead-daemon.js";
+import type { AgentHarness, HarnessEvent } from "../index.js";
+import type { CreateSessionHarnessInput, SessionHarnessFactory } from "./harness-factory.js";
 import { SessionStateStore } from "./state-store.js";
 
 const doubles = vi.hoisted(() => ({
   recoveredAssignments: [] as SessionAssign[],
   harnessOptions: [] as { piSessionFile?: string }[],
+  bridgeStartError: null as Error | null,
 }));
 
 vi.mock("../pi/harness.js", () => ({
   PiHarness: class {
+    readonly kind = "pi" as const;
     constructor(options: { piSessionFile?: string }) {
       doubles.harnessOptions.push(options);
     }
@@ -33,6 +37,7 @@ vi.mock("../pi/harness.js", () => ({
       return {
         productSessionId: options.productSessionId,
         harnessSessionId: `pi-${options.productSessionId}`,
+        harness: "pi",
       };
     }
     async close() {}
@@ -51,6 +56,7 @@ vi.mock("./bridge-session.js", () => ({
       this.sandboxId = options.assignment.sandboxId;
     }
     start() {
+      if (doubles.bridgeStartError) throw doubles.bridgeStartError;
       doubles.recoveredAssignments.push(this.options.assignment);
     }
     async shutdown() {
@@ -155,14 +161,66 @@ async function waitForHarnessOptions(timeoutMs = CONNECTION_WAIT_TIMEOUT_MS): Pr
   }
 }
 
+/** Yields to the real event loop until a bridge has started for the session. */
+async function waitForStartedSession(
+  productSessionId: string,
+  timeoutMs = CONNECTION_WAIT_TIMEOUT_MS
+): Promise<void> {
+  const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
+  while (
+    !doubles.recoveredAssignments.some(
+      (assignment) => assignment.productSessionId === productSessionId
+    ) &&
+    process.hrtime.bigint() < deadline
+  ) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/** Waits until the recovery record names the requested bridge generation. */
+async function waitForPersistedGeneration(
+  store: SessionStateStore,
+  productSessionId: string,
+  sandboxId: string,
+  timeoutMs = CONNECTION_WAIT_TIMEOUT_MS
+): Promise<void> {
+  const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
+  while (process.hrtime.bigint() < deadline) {
+    const persisted = await store.get(productSessionId);
+    if (persisted?.assignment.sandboxId === sandboxId) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`session ${productSessionId} did not persist generation ${sandboxId}`);
+}
+
+async function waitForCondition(
+  condition: () => boolean,
+  description: string,
+  timeoutMs = CONNECTION_WAIT_TIMEOUT_MS
+): Promise<void> {
+  const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
+  while (!condition() && process.hrtime.bigint() < deadline) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  if (!condition()) throw new Error(`timed out waiting for ${description}`);
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve = (_value: T): void => {};
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 /** An assignment this daemon accepts, for tests about what happens after. */
-function assignmentMessage(productSessionId: string): SessionAssign {
+function assignmentMessage(productSessionId: string, generation = productSessionId): SessionAssign {
   return {
     type: "session.assign",
     protocolVersion: OUTPOST_PROTOCOL_VERSION,
-    assignmentId: `assignment-${productSessionId}`,
+    assignmentId: `assignment-${generation}`,
     productSessionId,
-    sandboxId: `generation-${productSessionId}`,
+    sandboxId: `generation-${generation}`,
     sandboxAuthToken: "bridge-token",
     credentialFetchToken: "fetch-token",
     controlPlaneUrl: "https://control.example",
@@ -186,6 +244,12 @@ function alwaysWillingControlPlane(): void {
       output: { stdout: "", stderr: "", exitCode: 0 },
     })
   ) as unknown as typeof fetch;
+}
+
+function startupFailureFetchCalls(): Array<[RequestInfo | URL, RequestInit | undefined]> {
+  return vi
+    .mocked(globalThis.fetch)
+    .mock.calls.filter(([input]) => String(input).includes("/startup-failure"));
 }
 
 /**
@@ -216,6 +280,7 @@ describe("HomesteadDaemon reconnect", () => {
     FakeWebSocket.throwOnSend = false;
     doubles.recoveredAssignments = [];
     doubles.harnessOptions = [];
+    doubles.bridgeStartError = null;
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     // setImmediate stays real so the test can wait for WebCrypto.
     vi.useFakeTimers({
@@ -326,6 +391,439 @@ describe("HomesteadDaemon reconnect", () => {
     await waitForConnectionAttempts(2);
     FakeWebSocket.instances[1].emit("open", {});
     expect(JSON.parse(FakeWebSocket.instances[1].sent[0]).catalog).toEqual(catalog);
+  });
+
+  it("advertises exactly the available session harness factories", async () => {
+    const unavailableInThisTest = (): AgentHarness => {
+      throw new Error("this registration test must not construct a harness");
+    };
+    const harnessFactories: SessionHarnessFactory[] = [
+      { kind: "pi", create: unavailableInThisTest },
+      { kind: "claude-code", create: unavailableInThisTest },
+    ];
+    const daemon = makeDaemon({ harnessFactories });
+    await daemon.start();
+
+    FakeWebSocket.instances[0].emit("open", {});
+    const registration = homesteadToControlMessageSchema.parse(
+      JSON.parse(FakeWebSocket.instances[0].sent[0])
+    );
+
+    expect(registration.type === "homestead.register" && registration.harnesses).toEqual([
+      "pi",
+      "claude-code",
+    ]);
+  });
+
+  it("rejects an assignment whose harness has no factory", async () => {
+    const daemon = makeDaemon();
+    await daemon.start();
+    const socket = FakeWebSocket.instances[0];
+
+    socket.emit("message", {
+      data: JSON.stringify({
+        ...assignmentMessage("session-unsupported"),
+        harness: "claude-code",
+      }),
+    });
+
+    expect(JSON.parse(socket.sent[0])).toMatchObject({
+      type: "session.assign_rejected",
+      assignmentId: "assignment-session-unsupported",
+      reason: "harness claude-code is not available on this homestead",
+    });
+    expect(doubles.harnessOptions).toHaveLength(0);
+  });
+
+  it("creates a fresh session adapter through an injected deterministic factory", async () => {
+    alwaysWillingControlPlane();
+    const createSession = vi.fn(async (input: { productSessionId: string }) => ({
+      productSessionId: input.productSessionId,
+      harnessSessionId: `deterministic-${input.productSessionId}`,
+      harness: "pi" as const,
+    }));
+    const harness: AgentHarness = {
+      kind: "pi",
+      createSession,
+      async *sendPrompt() {
+        yield { type: "turn.completed" } satisfies HarnessEvent;
+      },
+      async interrupt() {},
+      async close() {},
+    };
+    const create = vi.fn((_input: CreateSessionHarnessInput) => harness);
+    const harnessFactories: SessionHarnessFactory[] = [{ kind: "pi", create }];
+    const daemon = makeDaemon({ harnessFactories });
+    await daemon.start();
+    const assignment = {
+      ...assignmentMessage("session-deterministic"),
+      model: "anthropic/claude-haiku-4-5",
+    };
+
+    FakeWebSocket.instances[0].emit("message", { data: JSON.stringify(assignment) });
+    await waitForStartedSession(assignment.productSessionId);
+
+    expect(create).toHaveBeenCalledWith({
+      productSessionId: assignment.productSessionId,
+      outpostId: assignment.outpostId,
+      credentialFetchToken: assignment.credentialFetchToken,
+      model: assignment.model,
+    });
+    expect(create.mock.calls[0]?.[0]).not.toHaveProperty("sandboxAuthToken");
+    expect(createSession).toHaveBeenCalledWith({
+      productSessionId: assignment.productSessionId,
+      workspacePath: assignment.workspacePath,
+      model: assignment.model,
+    });
+    expect(doubles.recoveredAssignments).toContainEqual(assignment);
+  });
+
+  it("reports a repository clone failure after accepting the assignment", async () => {
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null;
+      if (url.endsWith("/tool")) {
+        const tool = body as { input?: { command?: string } } | null;
+        if (tool?.input?.command?.includes("git clone")) {
+          return Response.json({
+            ok: true,
+            output: { stdout: "", stderr: "repository not found", exitCode: 128 },
+          });
+        }
+      }
+      return Response.json({
+        leaseId: "lease-1",
+        expiresAt: "2099-01-01T00:00:00Z",
+        ok: true,
+        output: { stdout: "", stderr: "", exitCode: 0 },
+      });
+    }) as unknown as typeof fetch;
+    const daemon = makeDaemon();
+    await daemon.start();
+    const socket = FakeWebSocket.instances[0];
+    const assignment = {
+      ...assignmentMessage("session-clone-failure"),
+      repositories: [
+        {
+          repoOwner: "acme",
+          repoName: "missing",
+          baseBranch: "main",
+          cloneUrl: "https://example.test/acme/missing.git",
+        },
+      ],
+    };
+
+    socket.emit("message", { data: JSON.stringify(assignment) });
+    await waitForCondition(
+      () => startupFailureFetchCalls().length === 1,
+      "repository clone startup failure report"
+    );
+
+    expect(socket.sent.map((message) => JSON.parse(message))).toContainEqual(
+      expect.objectContaining({
+        type: "session.assign_accepted",
+        assignmentId: assignment.assignmentId,
+      })
+    );
+    const [, init] = startupFailureFetchCalls()[0];
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer bridge-token");
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      stage: "repository_clone",
+      error: "Repository clone failed: git clone exited 128: repository not found",
+      sandboxId: assignment.sandboxId,
+      timestamp: expect.any(Number),
+    });
+  });
+
+  it("reports harness startup failure without ending the homestead", async () => {
+    alwaysWillingControlPlane();
+    const log = vi.fn();
+    const harness: AgentHarness = {
+      kind: "pi",
+      createSession: vi.fn(async () => {
+        throw new Error("Pi registry unavailable");
+      }),
+      async *sendPrompt() {
+        yield { type: "turn.completed" } satisfies HarnessEvent;
+      },
+      async interrupt() {},
+      async close() {},
+    };
+    const daemon = makeDaemon({
+      log,
+      harnessFactories: [{ kind: "pi", create: () => harness }],
+    });
+    await daemon.start();
+
+    FakeWebSocket.instances[0].emit("message", {
+      data: JSON.stringify(assignmentMessage("session-harness-failure")),
+    });
+    await waitForCondition(
+      () => startupFailureFetchCalls().length === 1,
+      "harness startup failure report"
+    );
+
+    const [, init] = startupFailureFetchCalls()[0];
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      stage: "harness_start",
+      error: "Session harness failed to start: Pi registry unavailable",
+    });
+    await expect(daemon.stop()).resolves.toBeUndefined();
+  });
+
+  it("reports bridge startup failure and releases the failed session", async () => {
+    alwaysWillingControlPlane();
+    doubles.bridgeStartError = new Error("socket constructor failed");
+    const daemon = makeDaemon();
+    await daemon.start();
+
+    FakeWebSocket.instances[0].emit("message", {
+      data: JSON.stringify(assignmentMessage("session-bridge-failure")),
+    });
+    await waitForCondition(
+      () => startupFailureFetchCalls().length === 1,
+      "bridge startup failure report"
+    );
+
+    const [, init] = startupFailureFetchCalls()[0];
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      stage: "bridge_start",
+      error: "Session bridge failed to start: socket constructor failed",
+    });
+    expect(daemon.activeSessionCount).toBe(0);
+  });
+
+  it("logs a refused startup failure report without crashing", async () => {
+    const log = vi.fn();
+    globalThis.fetch = vi.fn(async (input) => {
+      if (String(input).includes("/startup-failure")) {
+        return Response.json({ error: "generation replaced" }, { status: 409 });
+      }
+      return Response.json({
+        leaseId: "lease-1",
+        expiresAt: "2099-01-01T00:00:00Z",
+        ok: true,
+        output: { stdout: "", stderr: "", exitCode: 0 },
+      });
+    }) as unknown as typeof fetch;
+    const harness: AgentHarness = {
+      kind: "pi",
+      createSession: vi.fn(async () => {
+        throw new Error("harness unavailable");
+      }),
+      async *sendPrompt() {
+        yield { type: "turn.completed" } satisfies HarnessEvent;
+      },
+      async interrupt() {},
+      async close() {},
+    };
+    const daemon = makeDaemon({
+      log,
+      harnessFactories: [{ kind: "pi", create: () => harness }],
+    });
+    await daemon.start();
+
+    FakeWebSocket.instances[0].emit("message", {
+      data: JSON.stringify(assignmentMessage("session-report-refused")),
+    });
+    await waitForCondition(
+      () =>
+        log.mock.calls.some(
+          ([message]) => message === "control plane refused session startup failure report"
+        ),
+      "refused startup failure log"
+    );
+
+    await expect(daemon.stop()).resolves.toBeUndefined();
+  });
+
+  it("serializes concurrent assignments for the same product session", async () => {
+    alwaysWillingControlPlane();
+    const stateDir = await mkdtemp(join(tmpdir(), "homestead-assignment-order-"));
+    stateDirs.push(stateDir);
+    type CreatedSession = Awaited<ReturnType<AgentHarness["createSession"]>>;
+    const starts: Array<{
+      gate: ReturnType<typeof deferred<CreatedSession>>;
+      createSession: ReturnType<typeof vi.fn>;
+    }> = [];
+    const create = vi.fn((): AgentHarness => {
+      const gate = deferred<CreatedSession>();
+      const createSession = vi.fn(() => gate.promise);
+      starts.push({ gate, createSession });
+      return {
+        kind: "pi",
+        createSession,
+        async *sendPrompt() {
+          yield { type: "turn.completed" } satisfies HarnessEvent;
+        },
+        async interrupt() {},
+        async close() {},
+      };
+    });
+    const daemon = makeDaemon({ stateDir, harnessFactories: [{ kind: "pi", create }] });
+    await daemon.start();
+    const socket = FakeWebSocket.instances[0];
+    const first = assignmentMessage("session-ordered", "first");
+    const replacement = assignmentMessage("session-ordered", "replacement");
+
+    try {
+      socket.emit("message", { data: JSON.stringify(first) });
+      await waitForCondition(() => starts.length === 1, "first harness startup");
+
+      socket.emit("message", { data: JSON.stringify(replacement) });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(starts).toHaveLength(1);
+
+      starts[0].gate.resolve({
+        productSessionId: first.productSessionId,
+        harnessSessionId: "pi-first",
+        harness: "pi",
+      });
+      await waitForCondition(() => starts.length === 2, "replacement harness startup");
+      starts[1].gate.resolve({
+        productSessionId: replacement.productSessionId,
+        harnessSessionId: "pi-replacement",
+        harness: "pi",
+      });
+      await waitForPersistedGeneration(
+        new SessionStateStore(stateDir),
+        replacement.productSessionId,
+        replacement.sandboxId
+      );
+
+      expect(create).toHaveBeenCalledTimes(2);
+      expect(daemon.activeSessionCount).toBe(1);
+    } finally {
+      for (const [index, start] of starts.entries()) {
+        start.gate.resolve({
+          productSessionId: first.productSessionId,
+          harnessSessionId: `pi-cleanup-${index}`,
+          harness: "pi",
+        });
+      }
+    }
+  });
+
+  it("reserves capacity while a harness is still starting", async () => {
+    alwaysWillingControlPlane();
+    type CreatedSession = Awaited<ReturnType<AgentHarness["createSession"]>>;
+    const gate = deferred<CreatedSession>();
+    const create = vi.fn(
+      (): AgentHarness => ({
+        kind: "pi",
+        createSession: vi.fn(() => gate.promise),
+        async *sendPrompt() {
+          yield { type: "turn.completed" } satisfies HarnessEvent;
+        },
+        async interrupt() {},
+        async close() {},
+      })
+    );
+    const daemon = makeDaemon({
+      maxSessions: 1,
+      harnessFactories: [{ kind: "pi", create }],
+    });
+    await daemon.start();
+    const socket = FakeWebSocket.instances[0];
+    const occupying = assignmentMessage("session-occupying");
+    const rejected = assignmentMessage("session-over-capacity");
+
+    try {
+      socket.emit("message", { data: JSON.stringify(occupying) });
+      await waitForCondition(() => create.mock.calls.length === 1, "reserved harness startup");
+      socket.emit("message", { data: JSON.stringify(rejected) });
+      await waitForCondition(
+        () =>
+          socket.sent.some((message) => {
+            const decoded = JSON.parse(message) as { assignmentId?: string };
+            return decoded.assignmentId === rejected.assignmentId;
+          }),
+        "capacity rejection"
+      );
+
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(
+        socket.sent
+          .map((message) => JSON.parse(message))
+          .find((message) => message.assignmentId === rejected.assignmentId)
+      ).toMatchObject({
+        type: "session.assign_rejected",
+        reason: "homestead is at capacity; retry when a session ends",
+      });
+    } finally {
+      gate.resolve({
+        productSessionId: occupying.productSessionId,
+        harnessSessionId: "pi-occupying",
+        harness: "pi",
+      });
+    }
+  });
+
+  it("keeps a replacement active when the old bridge closes late", async () => {
+    alwaysWillingControlPlane();
+    const stateDir = await mkdtemp(join(tmpdir(), "homestead-generation-race-"));
+    stateDirs.push(stateDir);
+    const store = new SessionStateStore(stateDir);
+    const daemon = makeDaemon({ stateDir });
+    await daemon.start();
+    const socket = FakeWebSocket.instances[0];
+    const oldAssignment = assignmentMessage("session-replaced", "old");
+    const replacement = assignmentMessage("session-replaced", "new");
+
+    socket.emit("message", { data: JSON.stringify(oldAssignment) });
+    await waitForPersistedGeneration(
+      store,
+      oldAssignment.productSessionId,
+      oldAssignment.sandboxId
+    );
+
+    const realMarkDormant = SessionStateStore.prototype.markDormant;
+    let releaseDormancy = (): void => {};
+    const dormantGate = new Promise<void>((resolve) => {
+      releaseDormancy = resolve;
+    });
+    let finishDormancy = (): void => {};
+    const dormantFinished = new Promise<void>((resolve) => {
+      finishDormancy = resolve;
+    });
+    const markDormant = vi
+      .spyOn(SessionStateStore.prototype, "markDormant")
+      .mockImplementation(async function (productSessionId, expectedSandboxId) {
+        if (expectedSandboxId !== oldAssignment.sandboxId) {
+          return realMarkDormant.call(this, productSessionId, expectedSandboxId);
+        }
+        await dormantGate;
+        try {
+          await realMarkDormant.call(this, productSessionId, expectedSandboxId);
+        } finally {
+          finishDormancy();
+        }
+      });
+
+    try {
+      socket.emit("message", { data: JSON.stringify(replacement) });
+      await waitForPersistedGeneration(store, replacement.productSessionId, replacement.sandboxId);
+
+      expect(markDormant).toHaveBeenCalledWith(
+        oldAssignment.productSessionId,
+        oldAssignment.sandboxId
+      );
+      releaseDormancy();
+      await dormantFinished;
+
+      await expect(store.get(replacement.productSessionId)).resolves.toEqual({
+        assignment: expect.objectContaining({
+          assignmentId: replacement.assignmentId,
+          sandboxId: replacement.sandboxId,
+          workspacePath: replacement.workspacePath,
+        }),
+        repositories: [],
+        status: "active",
+      });
+    } finally {
+      releaseDormancy();
+      markDormant.mockRestore();
+    }
   });
 
   it("registers without a catalog when the harness could not be read", async () => {
@@ -595,7 +1093,7 @@ describe("HomesteadDaemon reconnect", () => {
       },
       repositories: [],
     });
-    await store.markDormant("session-expired");
+    await store.markDormant("session-expired", "generation-old");
 
     const piSessions = join(stateDir, "pi-sessions");
     await mkdir(piSessions, { recursive: true });
@@ -609,6 +1107,62 @@ describe("HomesteadDaemon reconnect", () => {
     await daemon.start();
 
     expect((await readdir(piSessions)).sort()).toEqual(["session-still-here.jsonl"]);
+  });
+
+  it("retries retention when one harness factory rejects cleanup", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "homestead-retention-retry-"));
+    stateDirs.push(stateDir);
+    const store = new SessionStateStore(stateDir);
+    await store.save({
+      status: "active",
+      assignment: {
+        type: "session.assign",
+        protocolVersion: OUTPOST_PROTOCOL_VERSION,
+        assignmentId: "assignment-retention",
+        productSessionId: "session-retention",
+        sandboxId: "generation-retention",
+        controlPlaneUrl: "https://control.example",
+        harness: "pi",
+        outpostId: "outpost-retention",
+        workspacePath: "/workspace/session-retention",
+      },
+      repositories: [],
+    });
+    await store.markDormant("session-retention", "generation-retention");
+    vi.setSystemTime(Date.now() + 91 * 24 * 60 * 60 * 1000);
+
+    const piCleanup = vi
+      .fn<(productSessionIds: readonly string[]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("cleanup unavailable"))
+      .mockResolvedValue(undefined);
+    const otherCleanup = vi.fn(async (_productSessionIds: readonly string[]) => {});
+    const unavailable = (): AgentHarness => {
+      throw new Error("dormant records must not create a harness");
+    };
+    const log = vi.fn();
+    const daemon = makeDaemon({
+      stateDir,
+      log,
+      harnessFactories: [
+        { kind: "pi", create: unavailable, removePersistedSessions: piCleanup },
+        { kind: "claude-code", create: unavailable, removePersistedSessions: otherCleanup },
+      ],
+    });
+
+    await expect(daemon.start()).resolves.toBeUndefined();
+    expect(piCleanup).toHaveBeenCalledWith(["session-retention"]);
+    expect(otherCleanup).toHaveBeenCalledWith(["session-retention"]);
+    await expect(store.get("session-retention")).resolves.toMatchObject({ status: "dormant" });
+    expect(log).toHaveBeenCalledWith(
+      "harness persisted-session cleanup failed; retaining recovery record",
+      expect.objectContaining({ harness: "pi", error: "cleanup unavailable" })
+    );
+
+    await daemon.stop();
+    await expect(daemon.start()).resolves.toBeUndefined();
+    expect(piCleanup).toHaveBeenCalledTimes(2);
+    expect(otherCleanup).toHaveBeenCalledTimes(2);
+    await expect(store.get("session-retention")).resolves.toBeNull();
   });
 });
 

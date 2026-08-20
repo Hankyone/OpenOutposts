@@ -89,8 +89,16 @@ export class SessionSandboxEventProcessor {
   ) {}
 
   /** The copy of an event that goes into the transcript. */
-  private forStorage(event: SandboxEvent): SandboxEvent {
-    return boundSandboxEventForStorage(event, this.retention.eventPayloadMaxBytes);
+  private forStorage<T extends SandboxEvent>(event: T, messageId: string | null) {
+    const stored = boundSandboxEventForStorage(event, this.retention.eventPayloadMaxBytes);
+    if (stored === null) {
+      this.log.warn("session.event_storage_skipped", {
+        event_type: event.type,
+        ...(messageId ? { message_id: messageId } : {}),
+        event_payload_max_bytes: this.retention.eventPayloadMaxBytes,
+      });
+    }
+    return stored;
   }
 
   private get log(): Logger {
@@ -157,13 +165,16 @@ export class SessionSandboxEventProcessor {
         metadata: artifact.metadata ? JSON.stringify(artifact.metadata) : null,
         createdAt: now,
       });
-      this.repository.createEvent({
-        id: generateId(),
-        type: event.type,
-        data: JSON.stringify(this.forStorage(augmentedEvent)),
-        messageId,
-        createdAt: now,
-      });
+      const storedEvent = this.forStorage(augmentedEvent, messageId);
+      if (storedEvent !== null) {
+        this.repository.createEvent({
+          id: generateId(),
+          type: event.type,
+          data: JSON.stringify(storedEvent),
+          messageId,
+          createdAt: now,
+        });
+      }
 
       this.messenger.broadcast({ type: "artifact_created", artifact });
       this.messenger.broadcast({ type: "sandbox_event", event: augmentedEvent });
@@ -172,7 +183,10 @@ export class SessionSandboxEventProcessor {
 
     if (event.type === "token") {
       if (messageId) {
-        this.repository.upsertTokenEvent(messageId, this.forStorage(event), now);
+        const storedEvent = this.forStorage(event, messageId);
+        if (storedEvent !== null) {
+          this.repository.upsertTokenEvent(messageId, storedEvent, now);
+        }
       }
       this.messenger.broadcast({ type: "sandbox_event", event });
       return;
@@ -195,13 +209,16 @@ export class SessionSandboxEventProcessor {
     if (event.type === "tool_call") {
       this.updateLastActivity(now);
       if (shouldPersistToolCallEvent(event.status)) {
-        this.repository.createEvent({
-          id: generateId(),
-          type: event.type,
-          data: JSON.stringify(this.forStorage(event)),
-          messageId,
-          createdAt: now,
-        });
+        const storedEvent = this.forStorage(event, messageId);
+        if (storedEvent !== null) {
+          this.repository.createEvent({
+            id: generateId(),
+            type: event.type,
+            data: JSON.stringify(storedEvent),
+            messageId,
+            createdAt: now,
+          });
+        }
       }
       this.messenger.broadcast({ type: "sandbox_event", event });
 
@@ -219,13 +236,16 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "tool_result") {
-      this.repository.createEvent({
-        id: generateId(),
-        type: event.type,
-        data: JSON.stringify(this.forStorage(event)),
-        messageId,
-        createdAt: now,
-      });
+      const storedEvent = this.forStorage(event, messageId);
+      if (storedEvent !== null) {
+        this.repository.createEvent({
+          id: generateId(),
+          type: event.type,
+          data: JSON.stringify(storedEvent),
+          messageId,
+          createdAt: now,
+        });
+      }
       this.messenger.broadcast({ type: "sandbox_event", event });
       return;
     }
@@ -236,15 +256,18 @@ export class SessionSandboxEventProcessor {
         completionMessageId != null && processingMessage?.id === completionMessageId;
 
       if (messageId) {
+        const storedEvent = this.forStorage(event, messageId);
         // Only a completion for a turn that is still running is the
         // authoritative account of how it ended. Once the turn has been
         // stopped or timed out, that outcome is already recorded and a late
         // arrival must not rewrite it — but it is still kept if nothing was
         // recorded at all, so a completion is never simply lost.
-        if (isStillProcessing) {
-          this.repository.upsertExecutionCompleteEvent(messageId, event, now);
-        } else {
-          this.repository.recordExecutionCompleteEventIfAbsent(messageId, event, now);
+        if (storedEvent !== null) {
+          if (isStillProcessing) {
+            this.repository.upsertExecutionCompleteEvent(messageId, storedEvent, now);
+          } else {
+            this.repository.recordExecutionCompleteEventIfAbsent(messageId, storedEvent, now);
+          }
         }
       }
 
@@ -296,13 +319,16 @@ export class SessionSandboxEventProcessor {
       return;
     }
 
-    this.repository.createEvent({
-      id: generateId(),
-      type: event.type,
-      data: JSON.stringify(this.forStorage(event)),
-      messageId,
-      createdAt: now,
-    });
+    const storedEvent = this.forStorage(event, messageId);
+    if (storedEvent !== null) {
+      this.repository.createEvent({
+        id: generateId(),
+        type: event.type,
+        data: JSON.stringify(storedEvent),
+        messageId,
+        createdAt: now,
+      });
+    }
 
     if (event.type === "git_sync") {
       this.repository.updateSandboxGitSyncStatus(event.status);

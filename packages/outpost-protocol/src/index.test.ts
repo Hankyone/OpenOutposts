@@ -6,6 +6,7 @@ import {
   HOMESTEAD_DUPLICATE_IDENTITY_CLOSE_CODE,
   HOMESTEAD_RECOVERY_VERSION,
   HOMESTEAD_SUPERSEDED_CLOSE_CODE,
+  MAX_SESSION_STARTUP_ERROR_LENGTH,
   bridgePromptCommandSchema,
   reasoningEffortSchema,
   thinkingLevelForReasoningEffort,
@@ -13,6 +14,7 @@ import {
   controlToWorkerMessageSchema,
   homesteadRecoveryRequestSchema,
   homesteadRecoveryResponseSchema,
+  sessionStartupFailureRequestSchema,
   homesteadToControlMessageSchema,
   outpostOperationSchema,
   toolInputSchemas,
@@ -203,6 +205,30 @@ describe("outpost protocol", () => {
         sandboxId: "sandbox-01",
         sandboxAuthToken: "bridge-token",
         credentialFetchToken: "fetch-token",
+      }).success
+    ).toBe(false);
+  });
+
+  it("bounds post-accept startup failure reports", () => {
+    expect(
+      sessionStartupFailureRequestSchema.parse({
+        stage: "repository_clone",
+        error: "git clone exited 128",
+        sandboxId: "sandbox-01",
+        timestamp: 1_800_000_000_000,
+      })
+    ).toEqual({
+      stage: "repository_clone",
+      error: "git clone exited 128",
+      sandboxId: "sandbox-01",
+      timestamp: 1_800_000_000_000,
+    });
+    expect(
+      sessionStartupFailureRequestSchema.safeParse({
+        stage: "repository_clone",
+        error: "x".repeat(MAX_SESSION_STARTUP_ERROR_LENGTH + 1),
+        sandboxId: "sandbox-01",
+        timestamp: 1_800_000_000_000,
       }).success
     ).toBe(false);
   });

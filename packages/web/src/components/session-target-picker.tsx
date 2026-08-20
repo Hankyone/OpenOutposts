@@ -2,13 +2,13 @@
 
 import { RepositoryMultiSelect } from "@/components/repository-multi-select";
 import { Combobox } from "@/components/ui/combobox";
-import { BranchIcon, ChevronDownIcon, RepoIcon } from "@/components/ui/icons";
+import { BranchIcon, ChevronDownIcon, MonitorIcon, RepoIcon } from "@/components/ui/icons";
 import type { SessionTargetPickerProps } from "@/hooks/use-session-target-picker";
 
 /**
- * The new-session target controls: the unified environment/repository
- * selector, the ad-hoc repository set editor, and the branch selector.
- * State and option building live in useSessionTargetPicker.
+ * The new-session target controls: the environment/repository selector, the
+ * ad-hoc repository set editor, the branch selector, and an independent
+ * machine selector. State and option building live in useSessionTargetPicker.
  */
 export function SessionTargetPicker({
   sessionTarget,
@@ -23,6 +23,12 @@ export function SessionTargetPicker({
   loadingBranches,
   repos,
   loadingRepos,
+  selectedOutpostId,
+  outpostOptions,
+  displayOutpostName,
+  onOutpostSelectValueChange,
+  loadingOutposts,
+  outpostsUnavailable,
   disabled,
 }: SessionTargetPickerProps & { disabled: boolean }) {
   return (
@@ -90,6 +96,33 @@ export function SessionTargetPicker({
             {loadingBranches ? "Loading..." : selectedBranch || "branch"}
           </span>
           <ChevronDownIcon className="w-3 h-3" />
+        </Combobox>
+      )}
+
+      {/* Machine placement stays independent from the repository target. */}
+      {(loadingOutposts || outpostsUnavailable || outpostOptions.length > 0) && (
+        <Combobox
+          value={selectedOutpostId ?? ""}
+          onChange={onOutpostSelectValueChange}
+          items={outpostOptions}
+          searchable
+          searchPlaceholder="Search machines..."
+          filterFn={(option, query) =>
+            option.label.toLowerCase().includes(query) ||
+            (option.description?.toLowerCase().includes(query) ?? false)
+          }
+          direction="up"
+          dropdownWidth="w-64"
+          disabled={
+            disabled || loadingOutposts || outpostsUnavailable || outpostOptions.length === 0
+          }
+          triggerClassName="flex max-w-full items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition"
+        >
+          <MonitorIcon className="w-4 h-4" />
+          <span className="truncate max-w-[12rem] sm:max-w-none">{displayOutpostName}</span>
+          {!loadingOutposts && !outpostsUnavailable && outpostOptions.length > 0 && (
+            <ChevronDownIcon className="w-3 h-3" />
+          )}
         </Combobox>
       )}
     </>

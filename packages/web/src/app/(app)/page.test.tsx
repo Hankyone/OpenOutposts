@@ -140,6 +140,16 @@ function sessionCreateBody(): Record<string, unknown> {
 }
 
 describe("Home", () => {
+  it("shows the five first-use checks below the composer", () => {
+    render(<Home />);
+
+    const readiness = screen.getByRole("list", { name: "Session readiness" });
+    expect(within(readiness).getAllByRole("listitem")).toHaveLength(5);
+    for (const label of ["Homestead", "Machine", "Provider key", "Model", "Repository"]) {
+      expect(within(readiness).getByText(label)).toBeInTheDocument();
+    }
+  });
+
   it("disables autofill suggestions for the prompt", () => {
     render(<Home />);
 

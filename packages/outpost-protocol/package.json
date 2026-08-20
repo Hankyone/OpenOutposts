@@ -13,6 +13,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "check:wire-vectors": "python3 test-fixtures/generators/generate_outpost_wire_vectors.py --check",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint src/",

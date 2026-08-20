@@ -10,6 +10,7 @@ import {
   isSessionTargetLaunchable,
   parseEnvironmentOptionValue,
   parseTargetSelectValue,
+  setSessionTargetOutpost,
 } from "./session-target";
 
 describe("parseEnvironmentOptionValue", () => {
@@ -68,6 +69,43 @@ describe("buildSessionTargetRequestFields", () => {
     expect(fields).toEqual({ repoOwner: "acme", repoName: "backend", branch: undefined });
     expect(JSON.parse(JSON.stringify(fields))).not.toHaveProperty("branch");
   });
+
+  it("combines a repository target with independent machine placement", () => {
+    const fields = buildSessionTargetRequestFields(
+      { kind: "repo", repoFullName: "acme/backend", outpostId: "workshop" },
+      "main"
+    );
+
+    expect(fields).toEqual({
+      repoOwner: "acme",
+      repoName: "backend",
+      branch: "main",
+      outpostId: "workshop",
+    });
+  });
+
+  it("combines every repository mode with independent machine placement", () => {
+    expect(buildSessionTargetRequestFields({ kind: "none", outpostId: "workshop" }, "")).toEqual({
+      repoOwner: null,
+      repoName: null,
+      outpostId: "workshop",
+    });
+    expect(
+      buildSessionTargetRequestFields(
+        { kind: "environment", environmentId: "env-1", outpostId: "workshop" },
+        ""
+      )
+    ).toEqual({ environmentId: "env-1", outpostId: "workshop" });
+    expect(
+      buildSessionTargetRequestFields(
+        { kind: "repos", repoFullNames: ["acme/backend"], outpostId: "workshop" },
+        ""
+      )
+    ).toEqual({
+      repositories: [{ repoOwner: "acme", repoName: "backend" }],
+      outpostId: "workshop",
+    });
+  });
 });
 
 describe("select-value round trip", () => {
@@ -108,6 +146,24 @@ describe("select-value round trip", () => {
     const existing: SessionTarget = { kind: "repos", repoFullNames: ["a/b", "a/c"] };
     expect(parseTargetSelectValue(MULTIPLE_REPOSITORIES_OPTION_VALUE, existing)).toBe(existing);
   });
+
+  it("keeps machine placement when the repository mode changes", () => {
+    const previous: SessionTarget = {
+      kind: "repo",
+      repoFullName: "acme/backend",
+      outpostId: "workshop",
+    };
+
+    expect(parseTargetSelectValue(NO_REPOSITORY_OPTION_VALUE, previous)).toEqual({
+      kind: "none",
+      outpostId: "workshop",
+    });
+    expect(parseTargetSelectValue(environmentOptionValue("env-1"), previous)).toEqual({
+      kind: "environment",
+      environmentId: "env-1",
+      outpostId: "workshop",
+    });
+  });
 });
 
 describe("getTargetConfigKey", () => {
@@ -115,6 +171,34 @@ describe("getTargetConfigKey", () => {
     const one = getTargetConfigKey({ kind: "repos", repoFullNames: ["a/b"] });
     const two = getTargetConfigKey({ kind: "repos", repoFullNames: ["a/b", "a/c"] });
     expect(one).not.toBe(two);
+  });
+
+  it("distinguishes machine placement for the same repository target", () => {
+    const first = getTargetConfigKey({
+      kind: "repo",
+      repoFullName: "acme/backend",
+      outpostId: "workshop",
+    });
+    const second = getTargetConfigKey({
+      kind: "repo",
+      repoFullName: "acme/backend",
+      outpostId: "laptop",
+    });
+    expect(first).not.toBe(second);
+  });
+});
+
+describe("setSessionTargetOutpost", () => {
+  it("changes and clears machine placement without changing the repository target", () => {
+    const target: SessionTarget = { kind: "repo", repoFullName: "acme/backend" };
+    const placed = setSessionTargetOutpost(target, "workshop");
+
+    expect(placed).toEqual({
+      kind: "repo",
+      repoFullName: "acme/backend",
+      outpostId: "workshop",
+    });
+    expect(setSessionTargetOutpost(placed, null)).toEqual(target);
   });
 });
 

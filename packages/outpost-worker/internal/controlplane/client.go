@@ -274,19 +274,6 @@ func jitteredDelay(delay time.Duration) time.Duration {
 	return delay - half + time.Duration(rand.Int64N(int64(half)+1))
 }
 
-// safeConn serializes writes so tool goroutines and the heartbeat loop can
-// share one WebSocket.
-type safeConn struct {
-	mu sync.Mutex
-	ws *websocket.Conn
-}
-
-func (s *safeConn) write(ctx context.Context, value any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return wsjson.Write(ctx, s.ws, value)
-}
-
 func (c *Client) connectAndServe(ctx context.Context) error {
 	connectionCtx, cancelConnection := context.WithCancel(ctx)
 	defer cancelConnection()
@@ -591,30 +578,11 @@ func (c *Client) handleContextRequest(
 		}
 		result.OK = true
 	}
-	enforceContextFrameLimit(&result)
-
 	writeCtx, cancelWrite := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelWrite()
-	if err := conn.write(writeCtx, result); err != nil {
+	if _, err := conn.writeContextResult(writeCtx, result); err != nil {
 		c.log.Error("send context result", "request_id", result.RequestID, "error", err)
 	}
-}
-
-func enforceContextFrameLimit(result *protocol.ContextResult) {
-	if !result.OK {
-		return
-	}
-	encoded, err := json.Marshal(result)
-	if err == nil && len(encoded) <= protocol.MaxFrameBytes {
-		return
-	}
-	result.OK = false
-	result.Files = []protocol.ContextFile{}
-	result.Error = fmt.Sprintf(
-		"workspace context exceeds the %d-byte encoded frame limit",
-		protocol.MaxFrameBytes,
-	)
-	result.ErrorCode = protocol.ErrExecution
 }
 
 func (c *Client) handleToolRequest(
@@ -635,21 +603,21 @@ func (c *Client) handleToolRequest(
 	if requestErr != nil {
 		result.Error = requestErr.Error()
 		result.ErrorCode = protocol.ErrInvalidInput
-		c.sendToolResult(ctx, conn, result)
+		_ = c.sendToolResult(ctx, conn, result)
 		return
 	}
 	if !firstDelivery {
 		select {
 		case <-state.done:
-			c.sendToolResult(ctx, conn, state.result)
+			_ = c.sendToolResult(ctx, conn, state.result)
 		case <-ctx.Done():
 		}
 		return
 	}
 
 	finish := func() {
-		c.completeToolRequest(message.RequestID, state, result)
-		c.sendToolResult(ctx, conn, result)
+		bounded := c.sendToolResult(ctx, conn, result)
+		c.completeToolRequest(message.RequestID, state, bounded)
 	}
 
 	held, known := c.leases.Get(message.LeaseID)
@@ -737,12 +705,18 @@ func (c *Client) handleToolRequest(
 	}
 }
 
-func (c *Client) sendToolResult(ctx context.Context, conn *safeConn, result protocol.ToolResult) {
+func (c *Client) sendToolResult(
+	ctx context.Context,
+	conn *safeConn,
+	result protocol.ToolResult,
+) protocol.ToolResult {
 	writeCtx, cancelWrite := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelWrite()
-	if err := conn.write(writeCtx, result); err != nil {
+	bounded, err := conn.writeToolResult(writeCtx, result)
+	if err != nil {
 		c.log.Error("send tool result", "request_id", result.RequestID, "error", err)
 	}
+	return bounded
 }
 
 func (c *Client) readMessages(ctx context.Context, ws *websocket.Conn, messages chan<- protocol.ServerMessage, readErrors chan<- error) {

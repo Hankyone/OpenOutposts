@@ -85,6 +85,31 @@ describe("SCM credentials router provider gate", () => {
     expect(new URL(fetch.mock.calls[0][0].url).pathname).toBe("/internal/verify-sandbox-token");
   });
 
+  it("keeps startup failure reporting independent of the SCM provider", async () => {
+    const { env, fetch } = createEnv();
+
+    const response = await handleRequest(
+      new Request("https://test.local/sessions/session-1/startup-failure", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer sandbox-token",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          stage: "repository_clone",
+          error: "repository not found",
+          sandboxId: "sandbox-1",
+          timestamp: 1,
+        }),
+      }),
+      env as never
+    );
+
+    expect(response.status).toBe(202);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(new URL(fetch.mock.calls[1][0].url).pathname).toBe("/internal/startup-failure");
+  });
+
   it("rejects service authentication for the signing-key broker", async () => {
     const { env } = createEnv();
 

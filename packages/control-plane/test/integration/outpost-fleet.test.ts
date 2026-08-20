@@ -103,7 +103,13 @@ describe("fleet routes the machines page drives", () => {
     });
 
     expect(response.status).toBe(200);
-    const body = await response.json<{ sessions: Array<Record<string, unknown>> }>();
+    const body = await response.json<{
+      connected: boolean;
+      lastHeartbeatAt: string | null;
+      sessions: Array<Record<string, unknown>>;
+    }>();
+    expect(body.connected).toBe(true);
+    expect(body.lastHeartbeatAt).toEqual(expect.any(String));
     expect(body.sessions).toEqual([
       {
         leaseId,

@@ -17,15 +17,16 @@ import {
   getTargetConfigKey,
   getTargetSelectValue,
   isSessionTargetLaunchable,
-  outpostOptionValue,
   parseTargetSelectValue,
+  setSessionTargetOutpost,
 } from "@/lib/session-target";
-import { useOutposts } from "@/hooks/use-outposts";
+import { useOutposts, type OutpostSummary } from "@/hooks/use-outposts";
 
 // Holds the picker's last-selected target as a select value — a repo fullName
 // or an `env:<id>` environment value. The key literal predates environments
 // (it stored only repo names) and is kept so stored repo values keep working.
 const LAST_SELECTED_TARGET_STORAGE_KEY = "openoutposts-last-selected-repo";
+const LAST_SELECTED_OUTPOST_STORAGE_KEY = "openoutposts-last-selected-outpost";
 
 /** Picker subtitle for an environment: its repository count. */
 export function describeEnvironment(environment: Environment): string {
@@ -36,6 +37,17 @@ export function describeEnvironment(environment: Environment): string {
 /** Picker subtitle for a repository: owner, and whether it is private. */
 export function describeRepository(repo: Repo): string {
   return `${repo.owner}${repo.private ? " • private" : ""}`;
+}
+
+/** Prefer a valid remembered machine, then the first connected machine. */
+export function chooseDefaultOutpostId(
+  outposts: OutpostSummary[],
+  storedOutpostId: string | null
+): string | null {
+  if (storedOutpostId && outposts.some((outpost) => outpost.id === storedOutpostId)) {
+    return storedOutpostId;
+  }
+  return outposts.find((outpost) => outpost.connected)?.id ?? null;
 }
 
 /** Render contract for SessionTargetPicker: the target/branch/multi-select controls. */
@@ -52,6 +64,12 @@ export interface SessionTargetPickerProps {
   loadingBranches: boolean;
   repos: Repo[];
   loadingRepos: boolean;
+  selectedOutpostId: string | null;
+  outpostOptions: ComboboxOption[];
+  displayOutpostName: string;
+  onOutpostSelectValueChange: (outpostId: string) => void;
+  loadingOutposts: boolean;
+  outpostsUnavailable: boolean;
 }
 
 /** Launch-facing selection state for the page: warming identity and request construction. */
@@ -62,6 +80,12 @@ export interface SessionTargetSelection {
   loadingRepos: boolean;
   /** The selected repository's metadata when the target is a single repo. */
   selectedRepo: Repo | undefined;
+  /** The selected machine's current fleet metadata, when it remains listed. */
+  selectedOutpost: OutpostSummary | undefined;
+  /** The fleet list is still resolving. */
+  loadingOutposts: boolean;
+  /** The fleet list could not be read, which is different from an empty list. */
+  outpostsUnavailable: boolean;
   isLaunchable: boolean;
   /** Selection identity for the sandbox-warming config check. */
   configKey: string;
@@ -72,15 +96,15 @@ export interface SessionTargetSelection {
 }
 
 /**
- * Owns the new-session target selection: SessionTarget state, the unified
- * environment/repository option list, branch and multi-repo handling, and
- * request-field construction. The controls render through SessionTargetPicker
- * via `pickerProps`; the page keeps model, prompt, and warming.
+ * Owns the new-session repository and machine selections, branch and
+ * multi-repo handling, and request-field construction. The controls render
+ * through SessionTargetPicker via `pickerProps`; the page keeps model, prompt,
+ * and warming.
  */
 export function useSessionTargetPicker(): SessionTargetSelection {
   const { repos, loading: loadingRepos } = useRepos();
   const { environments, loading: loadingEnvironments } = useEnvironments();
-  const { outposts } = useOutposts();
+  const { outposts, loading: loadingOutposts, unavailable: outpostsUnavailable } = useOutposts();
   const [sessionTarget, setSessionTarget] = useState<SessionTarget | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<string>("");
 
@@ -133,6 +157,33 @@ export function useSessionTargetPicker(): SessionTargetSelection {
     localStorage.setItem(LAST_SELECTED_TARGET_STORAGE_KEY, getTargetSelectValue(sessionTarget));
   }, [sessionTarget]);
 
+  // Machine placement is independent of the repository target. Restore a
+  // still-listed machine first; otherwise choose a connected machine. Leaving
+  // the field absent keeps deployments with no outpost fleet compatible.
+  useEffect(() => {
+    if (!sessionTarget || loadingOutposts || outpostsUnavailable) return;
+    if (
+      sessionTarget.outpostId &&
+      outposts.some((outpost) => outpost.id === sessionTarget.outpostId)
+    ) {
+      return;
+    }
+
+    const defaultOutpostId = chooseDefaultOutpostId(
+      outposts,
+      localStorage.getItem(LAST_SELECTED_OUTPOST_STORAGE_KEY)
+    );
+    if ((sessionTarget.outpostId ?? null) === defaultOutpostId) return;
+    setSessionTarget((current) =>
+      current ? setSessionTargetOutpost(current, defaultOutpostId) : current
+    );
+  }, [sessionTarget, loadingOutposts, outpostsUnavailable, outposts]);
+
+  useEffect(() => {
+    if (!sessionTarget?.outpostId) return;
+    localStorage.setItem(LAST_SELECTED_OUTPOST_STORAGE_KEY, sessionTarget.outpostId);
+  }, [sessionTarget?.outpostId]);
+
   const onTargetSelectValueChange = useCallback(
     (value: string) => {
       const nextTarget = parseTargetSelectValue(value, sessionTarget);
@@ -148,7 +199,17 @@ export function useSessionTargetPicker(): SessionTargetSelection {
   );
 
   const onMultiSelectionChange = useCallback((repoFullNames: string[]) => {
-    setSessionTarget({ kind: "repos", repoFullNames });
+    setSessionTarget((current) => ({
+      kind: "repos",
+      repoFullNames,
+      ...(current?.outpostId ? { outpostId: current.outpostId } : {}),
+    }));
+  }, []);
+
+  const onOutpostSelectValueChange = useCallback((outpostId: string) => {
+    setSessionTarget((current) =>
+      current ? setSessionTargetOutpost(current, outpostId) : current
+    );
   }, []);
 
   const buildRequestFields = useCallback((): SessionTargetRequestFields | null => {
@@ -164,6 +225,9 @@ export function useSessionTargetPicker(): SessionTargetSelection {
     sessionTarget?.kind === "environment"
       ? environments.find((environment) => environment.id === sessionTarget.environmentId)
       : undefined;
+  const selectedOutpost = sessionTarget?.outpostId
+    ? outposts.find((outpost) => outpost.id === sessionTarget.outpostId)
+    : undefined;
   const displayTargetName = (() => {
     switch (sessionTarget?.kind) {
       case "none":
@@ -176,10 +240,6 @@ export function useSessionTargetPicker(): SessionTargetSelection {
         const count = sessionTarget.repoFullNames.length;
         if (count === 0) return "Select repositories";
         return `${count} ${count === 1 ? "repository" : "repositories"}`;
-      }
-      case "outpost": {
-        const outpost = outposts.find((candidate) => candidate.id === sessionTarget.outpostId);
-        return outpost?.name ?? sessionTarget.outpostId;
       }
       default:
         return "Select repo";
@@ -203,21 +263,6 @@ export function useSessionTargetPicker(): SessionTargetSelection {
       description: describeRepository(repo),
     })),
   ];
-  // One unified list: outposts and environments (when any exist) alongside
-  // the repositories. Outposts run the session on an enrolled machine.
-  const outpostGroup: ComboboxGroup | null =
-    outposts.length > 0
-      ? {
-          category: "Outposts",
-          options: outposts.map((outpost) => ({
-            value: outpostOptionValue(outpost.id),
-            label: outpost.name,
-            description: outpost.connected
-              ? `${outpost.platform}/${outpost.architecture} — connected`
-              : `${outpost.platform}/${outpost.architecture} — offline`,
-          })),
-        }
-      : null;
   const environmentGroup: ComboboxGroup | null =
     environments.length > 0
       ? {
@@ -229,14 +274,23 @@ export function useSessionTargetPicker(): SessionTargetSelection {
           })),
         }
       : null;
-  const groups = [
-    ...(outpostGroup ? [outpostGroup] : []),
-    ...(environmentGroup ? [environmentGroup] : []),
-  ];
+  const groups = [...(environmentGroup ? [environmentGroup] : [])];
   const targetOptions: ComboboxOption[] | ComboboxGroup[] =
     groups.length > 0
       ? [...groups, { category: "Repositories", options: repositoryOptions }]
       : repositoryOptions;
+  const outpostOptions: ComboboxOption[] = outposts.map((outpost) => ({
+    value: outpost.id,
+    label: outpost.name,
+    description: outpost.connected
+      ? `${outpost.platform}/${outpost.architecture}, connected`
+      : `${outpost.platform}/${outpost.architecture}, offline`,
+  }));
+  const displayOutpostName = loadingOutposts
+    ? "Loading machines..."
+    : outpostsUnavailable
+      ? "Machines unavailable"
+      : (selectedOutpost?.name ?? (outposts.length > 0 ? "Select machine" : "No machines"));
 
   return {
     sessionTarget,
@@ -244,6 +298,9 @@ export function useSessionTargetPicker(): SessionTargetSelection {
     repos,
     loadingRepos,
     selectedRepo,
+    selectedOutpost,
+    loadingOutposts,
+    outpostsUnavailable,
     isLaunchable: isSessionTargetLaunchable(sessionTarget),
     configKey: getTargetConfigKey(sessionTarget),
     buildRequestFields,
@@ -260,6 +317,12 @@ export function useSessionTargetPicker(): SessionTargetSelection {
       loadingBranches,
       repos,
       loadingRepos,
+      selectedOutpostId: sessionTarget?.outpostId ?? null,
+      outpostOptions,
+      displayOutpostName,
+      onOutpostSelectValueChange,
+      loadingOutposts,
+      outpostsUnavailable,
     },
   };
 }

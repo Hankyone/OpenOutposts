@@ -16,6 +16,8 @@ export interface HistoryCursor {
 export interface SessionSocketState {
   replaying: boolean;
   sessionState: SessionState | null;
+  /** The last failure that prevented this session's runtime from starting. */
+  startupError: string | null;
   events: SandboxEvent[];
   participants: ParticipantPresence[];
   artifacts: Artifact[];
@@ -28,6 +30,7 @@ export interface SessionSocketState {
 export const initialSessionSocketState: SessionSocketState = {
   replaying: true,
   sessionState: null,
+  startupError: null,
   events: [],
   participants: [],
   artifacts: [],
@@ -141,6 +144,8 @@ function reduceServerMessage(
       return {
         ...state,
         replaying: false,
+        startupError:
+          message.state.sandboxStatus === "failed" ? (message.spawnError ?? null) : null,
         sessionState: {
           ...message.state,
           // Backward-compatible defaults for older sessions that may omit these.
@@ -180,10 +185,13 @@ function reduceServerMessage(
       };
 
     case "sandbox_warming":
-      return updateSessionState(state, (prev) => ({ ...prev, sandboxStatus: "warming" }));
+      return updateSessionState({ ...state, startupError: null }, (prev) => ({
+        ...prev,
+        sandboxStatus: "warming",
+      }));
 
     case "sandbox_spawning":
-      return updateSessionState(state, (prev) => ({
+      return updateSessionState({ ...state, startupError: null }, (prev) => ({
         ...prev,
         sandboxStatus: "spawning",
         ...CLEARED_SANDBOX_ACCESS_STATE,
@@ -196,19 +204,25 @@ function reduceServerMessage(
         message.status === "stale" ||
         message.status === "stopped" ||
         message.status === "failed";
-      return updateSessionState(state, (prev) => ({
-        ...prev,
-        sandboxStatus: message.status,
-        ...(shouldClearAccessState && CLEARED_SANDBOX_ACCESS_STATE),
-        ...(isReplacementStart && { sandboxDashboardUrl: undefined }),
-      }));
+      return updateSessionState(
+        { ...state, ...(message.status === "failed" ? {} : { startupError: null }) },
+        (prev) => ({
+          ...prev,
+          sandboxStatus: message.status,
+          ...(shouldClearAccessState && CLEARED_SANDBOX_ACCESS_STATE),
+          ...(isReplacementStart && { sandboxDashboardUrl: undefined }),
+        })
+      );
     }
 
     case "sandbox_ready":
-      return updateSessionState(state, (prev) => ({ ...prev, sandboxStatus: "ready" }));
+      return updateSessionState({ ...state, startupError: null }, (prev) => ({
+        ...prev,
+        sandboxStatus: "ready",
+      }));
 
     case "sandbox_error":
-      return updateSessionState(state, (prev) => ({
+      return updateSessionState({ ...state, startupError: message.error }, (prev) => ({
         ...prev,
         sandboxStatus: "failed",
         ...CLEARED_SANDBOX_ACCESS_STATE,

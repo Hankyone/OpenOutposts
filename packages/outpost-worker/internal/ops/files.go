@@ -87,7 +87,17 @@ func (x Executor) read(workspace string, raw json.RawMessage) (any, error) {
 		lastPart = firstPart + input.LimitLines
 	}
 
-	var content strings.Builder
+	// Reserve the complete fixed read-result shape before spending bytes on
+	// content. math.MaxInt is deliberately used for totalLines so the actual
+	// integer can never make the final result larger than this base.
+	emptyResult, err := json.Marshal(readResult{Content: "", TotalLines: math.MaxInt, Truncated: false})
+	if err != nil {
+		return nil, errorf(protocol.ErrExecution, "prepare read result budget: %v", err)
+	}
+	content := &cappedBuffer{
+		limit:    protocol.MaxToolOutputBytes - len(emptyResult),
+		rawLimit: maxReadBytes,
+	}
 	partIndex := 0
 	totalLines := 1
 	partsWritten := 0
@@ -95,17 +105,7 @@ func (x Executor) read(workspace string, raw json.RawMessage) (any, error) {
 	truncated := input.OffsetLines > 0
 
 	appendBytes := func(text []byte) {
-		room := maxReadBytes - content.Len()
-		if room <= 0 {
-			truncated = truncated || len(text) > 0
-			return
-		}
-		if len(text) > room {
-			content.Write(text[:room])
-			truncated = true
-			return
-		}
-		content.Write(text)
+		_, _ = content.Write(text)
 	}
 	appendPart := func(text []byte) {
 		if partIndex < firstPart || partIndex >= lastPart {
@@ -145,7 +145,12 @@ func (x Executor) read(workspace string, raw json.RawMessage) (any, error) {
 		truncated = true
 	}
 
-	return readResult{Content: content.String(), TotalLines: totalLines, Truncated: truncated}, nil
+	contentText := content.string()
+	return readResult{
+		Content:    contentText,
+		TotalLines: totalLines,
+		Truncated:  truncated || content.truncated,
+	}, nil
 }
 
 type writeInput struct {
@@ -321,11 +326,27 @@ func (x Executor) ls(workspace string, raw json.RawMessage) (any, error) {
 
 	// Sort before capping so the listing a caller pages through is stable
 	// rather than whatever order the filesystem happened to return.
-	truncated := false
-	if len(entries) > maxLsEntries {
-		entries = entries[:maxLsEntries]
-		truncated = true
+	budget, err := newJSONArrayBudget(
+		protocol.MaxToolOutputBytes,
+		lsResult{Entries: []lsEntry{}, Truncated: false},
+	)
+	if err != nil {
+		return nil, errorf(protocol.ErrExecution, "prepare ls result budget: %v", err)
+	}
+	selected := make([]lsEntry, 0, min(len(entries), maxLsEntries))
+	for _, entry := range entries {
+		if len(selected) >= maxLsEntries {
+			break
+		}
+		fits, budgetErr := budget.add(entry)
+		if budgetErr != nil {
+			return nil, errorf(protocol.ErrExecution, "encode ls entry: %v", budgetErr)
+		}
+		if !fits {
+			break
+		}
+		selected = append(selected, entry)
 	}
 
-	return lsResult{Entries: entries, Truncated: truncated}, nil
+	return lsResult{Entries: selected, Truncated: len(selected) < len(entries)}, nil
 }

@@ -310,6 +310,8 @@ func TestLeaseAndToolExecution(t *testing.T) {
 func TestContextResultStaysWithinTheEncodedFrameLimit(t *testing.T) {
 	t.Parallel()
 
+	writer := &recordingFrameWriter{}
+	conn := &safeConn{ws: writer}
 	result := protocol.ContextResult{
 		OK: true,
 		Files: []protocol.ContextFile{{
@@ -317,10 +319,16 @@ func TestContextResultStaysWithinTheEncodedFrameLimit(t *testing.T) {
 			Content: strings.Repeat("\x00", protocol.MaxFrameBytes/2),
 		}},
 	}
-	enforceContextFrameLimit(&result)
+	bounded, err := conn.writeContextResult(context.Background(), result)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if result.OK || result.ErrorCode != protocol.ErrExecution || len(result.Files) != 0 {
-		t.Fatalf("oversized encoded context was not replaced with an error: %#v", result)
+	if bounded.OK || bounded.ErrorCode != protocol.ErrExecution || len(bounded.Files) != 0 {
+		t.Fatalf("oversized encoded context was not replaced with an error: %#v", bounded)
+	}
+	if len(writer.frames) != 1 || len(writer.frames[0]) > protocol.MaxFrameBytes {
+		t.Fatalf("bounded context writes=%d bytes=%d", len(writer.frames), len(writer.frames[0]))
 	}
 }
 

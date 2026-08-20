@@ -1,27 +1,22 @@
-import { readdir, rm } from "node:fs/promises";
-import { dirname, basename, join } from "node:path";
+import { dirname, basename } from "node:path";
 
 import {
   OUTPOST_PROTOCOL_VERSION,
   HOMESTEAD_DUPLICATE_IDENTITY_CLOSE_CODE,
+  MAX_SESSION_STARTUP_ERROR_LENGTH,
   controlToHomesteadMessageSchema,
   type ModelCatalog,
   type HomesteadRegistration,
   type SessionAssign,
+  type SessionStartupFailureRequest,
 } from "@openoutposts/outpost-protocol";
 
 import { buildServiceAuthHeaders } from "@openoutposts/outpost-protocol";
 import { OutpostClient } from "../outpost-client.js";
-import {
-  createSessionCredentialStore,
-  unconfiguredCredentialStore,
-  type PiCredential,
-  type SessionCredentialStore,
-} from "../pi/credential-store.js";
-import { PiHarness } from "../pi/harness.js";
-import { splitModelSpec } from "../pi/session.js";
+import { PiHarnessFactory } from "../pi/factory.js";
 import { BridgeSession } from "./bridge-session.js";
 import { SessionDiffPublisher, type WorkspaceHomestead } from "./diff-capture.js";
+import { indexSessionHarnessFactories, type SessionHarnessFactory } from "./harness-factory.js";
 import { shellQuote } from "./shell.js";
 import { SessionStateStore } from "./state-store.js";
 
@@ -36,13 +31,6 @@ const KEEPALIVE_INTERVAL_MS = 60_000;
 const WORKSPACE_SETUP_LEASE_TTL_MS = 60_000;
 const CLONE_LEASE_TTL_MS = 15 * 60 * 1000;
 const CLONE_TIMEOUT_MS = 300_000;
-
-/**
- * Where the harness conversations sit inside the state directory, beside the
- * recovery records rather than mixed in with them: the state store treats
- * every `.json` file in its own directory as a session record.
- */
-const PI_SESSION_SUBDIR = "pi-sessions";
 
 export type CloneAuthMode = "machine" | "brokered";
 
@@ -93,6 +81,12 @@ export interface HomesteadDaemonOptions {
   stateDir?: string;
   /** Maximum concurrent sessions (central harness processes). Default 8. */
   maxSessions?: number;
+  /**
+   * Composition seam for tests and future built-in adapters. Production omits
+   * this and receives the single Pi factory. Each factory must create a fresh
+   * adapter for every product session.
+   */
+  harnessFactories?: readonly SessionHarnessFactory[];
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -131,7 +125,10 @@ export class HomesteadDaemon {
   readonly #options: HomesteadDaemonOptions;
   readonly #outposts: OutpostClient;
   readonly #sessions = new Map<string, BridgeSession>();
+  readonly #reservedSessionIds = new Set<string>();
+  readonly #assignmentTails = new Map<string, Promise<void>>();
   readonly #stateStore: SessionStateStore | null;
+  readonly #harnessFactories: ReadonlyMap<SessionHarnessFactory["kind"], SessionHarnessFactory>;
   readonly #maxSessions: number;
   #ws: WebSocket | null = null;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -155,6 +152,18 @@ export class HomesteadDaemon {
       internalSecret: options.internalSecret,
     });
     this.#stateStore = options.stateDir ? new SessionStateStore(options.stateDir) : null;
+    const factories = options.harnessFactories ?? [
+      new PiHarnessFactory({
+        outposts: this.#outposts,
+        controlPlaneUrl: options.controlPlaneUrl,
+        ...(options.stateDir === undefined ? {} : { stateDir: options.stateDir }),
+        ...(options.devPiKeyCommand === undefined
+          ? {}
+          : { devPiKeyCommand: options.devPiKeyCommand }),
+        ...(options.log === undefined ? {} : { log: options.log }),
+      }),
+    ];
+    this.#harnessFactories = indexSessionHarnessFactories(factories);
   }
 
   async start(): Promise<void> {
@@ -188,19 +197,25 @@ export class HomesteadDaemon {
    */
   async #recoverPersistedSessions(): Promise<void> {
     if (!this.#stateStore) return;
-    const pruned = await this.#stateStore.pruneDormant().catch((): string[] => []);
+    const pruned = await this.#stateStore
+      .pruneDormant({
+        beforeRemove: (productSessionIds) =>
+          this.#removePersistedHarnessSessions(productSessionIds),
+      })
+      .catch((): string[] => []);
     if (pruned.length > 0) {
       this.#log("pruned expired dormant session records", { count: pruned.length });
-      // The conversation is kept under the same retention promise as the record
-      // that points at it, so it goes at the same moment.
-      await this.#removePiSessionFiles(pruned);
     }
 
     const persisted = await this.#stateStore.loadAll();
     const active = persisted.filter((entry) => entry.status === "active");
     const capacity = this.#maxSessions;
+    const recovering = active.slice(0, capacity);
+    for (const entry of recovering) {
+      this.#reservedSessionIds.add(entry.assignment.productSessionId);
+    }
     await Promise.all(
-      active.slice(0, capacity).map(async (entry) => {
+      recovering.map(async (entry) => {
         const session = entry.assignment.productSessionId;
         this.#log("rotating session credentials for restart recovery", { session });
         try {
@@ -215,10 +230,15 @@ export class HomesteadDaemon {
           };
           this.#log("session credentials rotated; recovering after restart", { session });
           void this.#track(
-            this.#startSession(assignment, entry.repositories),
+            this.#queueAssignment(session, () =>
+              this.#startSession(assignment, entry.repositories)
+            ).finally(() => {
+              this.#reservedSessionIds.delete(session);
+            }),
             `restart recovery for session ${session}`
           );
         } catch (error) {
+          this.#reservedSessionIds.delete(session);
           this.#log("session restart recovery failed; no stored or stale credential will be used", {
             session,
             error: error instanceof Error ? error.message : String(error),
@@ -236,47 +256,29 @@ export class HomesteadDaemon {
     }
   }
 
-  /** The directory holding this homestead's Pi conversations, if it has one. */
-  #piSessionDir(): string | null {
-    return this.#options.stateDir ? join(this.#options.stateDir, PI_SESSION_SUBDIR) : null;
-  }
-
   /**
-   * Where one product session's Pi conversation lives.
-   *
-   * A homestead with no state directory gets null and keeps its conversations
-   * in memory: a demo run should leave nothing behind, and picking a directory
-   * of our own would put a user's conversation somewhere nobody configured.
+   * Gives every adapter factory a chance to remove its retained session state.
+   * One failed factory does not prevent the others from running, but it does
+   * retain the recovery record so the failed cleanup is retried next startup.
    */
-  #piSessionFile(productSessionId: string): string | null {
-    const dir = this.#piSessionDir();
-    // Session ids are hex/uuid-like; encode defensively anyway, as the state
-    // store does for its own records.
-    return dir ? join(dir, `${encodeURIComponent(productSessionId)}.jsonl`) : null;
-  }
-
-  /**
-   * Deletes the conversations of sessions whose records have been pruned,
-   * including any copy set aside because it could not be read.
-   *
-   * Best effort throughout: a file that cannot be removed is a leftover on
-   * disk, and failing startup over one would cost every live session.
-   */
-  async #removePiSessionFiles(productSessionIds: string[]): Promise<void> {
-    const dir = this.#piSessionDir();
-    if (!dir) return;
-    let files: string[];
-    try {
-      files = await readdir(dir);
-    } catch {
-      return;
-    }
-    const names = productSessionIds.map((id) => `${encodeURIComponent(id)}.jsonl`);
-    for (const file of files) {
-      const owned = names.some((name) => file === name || file.startsWith(`${name}.corrupt-`));
-      if (!owned) continue;
-      await rm(join(dir, file), { force: true }).catch(() => {});
-    }
+  async #removePersistedHarnessSessions(productSessionIds: readonly string[]): Promise<boolean> {
+    let complete = true;
+    await Promise.all(
+      [...this.#harnessFactories.values()].map(async (factory) => {
+        if (!factory.removePersistedSessions) return;
+        try {
+          await factory.removePersistedSessions(productSessionIds);
+        } catch (error) {
+          complete = false;
+          this.#log("harness persisted-session cleanup failed; retaining recovery record", {
+            harness: factory.kind,
+            sessions: productSessionIds.length,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })
+    );
+    return complete;
   }
 
   async stop(): Promise<void> {
@@ -328,7 +330,7 @@ export class HomesteadDaemon {
         protocolVersion: OUTPOST_PROTOCOL_VERSION,
         homesteadId: this.#options.homesteadId,
         homesteadVersion: this.#options.homesteadVersion,
-        harnesses: ["pi"],
+        harnesses: [...this.#harnessFactories.keys()],
         ...(this.#options.catalog === undefined ? {} : { catalog: this.#options.catalog }),
       };
       this.#safeSend(ws, registration, "registration");
@@ -445,7 +447,7 @@ export class HomesteadDaemon {
 
     // Validate before disturbing anything: a rejected assignment must leave
     // an already-running session untouched.
-    if (assignment.harness !== "pi") {
+    if (!this.#harnessFactories.has(assignment.harness)) {
       respond(false, `harness ${assignment.harness} is not available on this homestead`);
       return;
     }
@@ -454,48 +456,77 @@ export class HomesteadDaemon {
       return;
     }
 
-    const existing = this.#sessions.get(assignment.productSessionId);
-    if (existing?.sandboxId === assignment.sandboxId) {
-      // Same credential generation (lifecycle retry): the existing bridge
-      // keeps serving it.
-      respond(true);
-      return;
-    }
-    // A replacement reuses the outgoing session's slot, so only genuinely
-    // new sessions count against capacity.
-    if (!existing && this.#sessions.size >= this.#maxSessions) {
-      respond(false, "homestead is at capacity; retry when a session ends");
-      return;
-    }
-    if (existing) {
-      // The session is waking (or being re-issued) with fresh credentials:
-      // retire the old bridge, then start anew in the same workspace.
-      this.#log("session waking with new credentials; replacing bridge", {
-        session: assignment.productSessionId,
-      });
-      await existing.shutdown();
-    }
+    return this.#queueAssignment(assignment.productSessionId, async () => {
+      if (this.#stopped) return;
+      const existing = this.#sessions.get(assignment.productSessionId);
+      if (existing?.sandboxId === assignment.sandboxId) {
+        // Same credential generation (lifecycle retry): the existing bridge
+        // keeps serving it.
+        respond(true);
+        return;
+      }
+      if (!this.#hasCapacityFor(assignment.productSessionId)) {
+        respond(false, "homestead is at capacity; retry when a session ends");
+        return;
+      }
 
-    try {
-      await this.#ensureWorkspace(assignment);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.#log("workspace preparation failed", {
-        session: assignment.productSessionId,
-        error: message,
-      });
-      respond(false, `workspace preparation failed: ${message}`);
-      return;
-    }
+      // The reservation survives every await through bridge registration. It
+      // counts pending starts and keeps a replacement's outgoing slot claimed.
+      this.#reservedSessionIds.add(assignment.productSessionId);
+      try {
+        if (existing) {
+          // The session is waking (or being re-issued) with fresh credentials:
+          // retire the old bridge, then start anew in the same workspace.
+          this.#log("session waking with new credentials; replacing bridge", {
+            session: assignment.productSessionId,
+          });
+          await existing.shutdown();
+        }
 
-    // Accept now; the harness boots asynchronously. If it fails to come up,
-    // the bridge never connects and the session's connecting-timeout watchdog
-    // fails the sandbox through the normal lifecycle path.
-    respond(true);
-    void this.#track(
-      this.#startSession(assignment),
-      `session start for ${assignment.productSessionId}`
-    );
+        try {
+          await this.#ensureWorkspace(assignment);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.#log("workspace preparation failed", {
+            session: assignment.productSessionId,
+            error: message,
+          });
+          respond(false, `workspace preparation failed: ${message}`);
+          return;
+        }
+
+        // Accept before the harness boots. The reservation and per-session
+        // queue remain held until startup settles, so no second assignment can
+        // race the adapter or its transcript.
+        respond(true);
+        await this.#startSession(assignment);
+      } finally {
+        this.#reservedSessionIds.delete(assignment.productSessionId);
+      }
+    });
+  }
+
+  #hasCapacityFor(productSessionId: string): boolean {
+    const occupied = new Set([...this.#sessions.keys(), ...this.#reservedSessionIds]);
+    return occupied.has(productSessionId) || occupied.size < this.#maxSessions;
+  }
+
+  /** Runs assignment and recovery starts for one product session in order. */
+  #queueAssignment<T>(productSessionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#assignmentTails.get(productSessionId) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const tail = result
+      .then(
+        () => {},
+        () => {}
+      )
+      .finally(() => {
+        if (this.#assignmentTails.get(productSessionId) === tail) {
+          this.#assignmentTails.delete(productSessionId);
+        }
+      });
+    this.#assignmentTails.set(productSessionId, tail);
+    return result;
   }
 
   /**
@@ -547,58 +578,42 @@ export class HomesteadDaemon {
         try {
           repositories = [await this.#cloneRepository(assignment, assignment.repositories[0])];
         } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
           this.#log("repository clone failed; session will not start", {
             session: assignment.productSessionId,
-            error: error instanceof Error ? error.message : String(error),
+            error: message,
           });
+          await this.#reportStartupFailure(
+            assignment,
+            "repository_clone",
+            `Repository clone failed: ${message}`
+          );
           return;
         }
       }
     }
 
-    const model = assignment.model;
-    const credential = this.#piCredential(assignment, model);
-    const onPiLog = (line: string): void =>
-      this.#log("pi", { line, session: assignment.productSessionId });
-
-    let credentials: SessionCredentialStore;
-    if (!credential) {
-      // Say so while it is still diagnosable. Every turn of this session will
-      // refuse rather than run: the homestead carries no key it could stand in.
-      this.#log(
-        "no provider could be derived from the session's model; every turn of this session will refuse",
-        { session: assignment.productSessionId, model: model ?? null }
-      );
-      credentials = unconfiguredCredentialStore(
-        `no provider could be derived from the session's model (${model ?? "none chosen"})`
-      );
-    } else {
-      if (credential.kind === "key-command") {
-        this.#log(
-          "DEVELOPMENT credential override in use: this session runs on the homestead operator's key, not the session owner's",
-          { session: assignment.productSessionId, provider: credential.providerId }
+    let stage: SessionStartupFailureRequest["stage"] = "harness_start";
+    try {
+      const factory = this.#harnessFactories.get(assignment.harness);
+      if (!factory) {
+        throw new Error(`harness ${assignment.harness} is not available on this homestead`);
+      }
+      const harness = factory.create({
+        productSessionId: assignment.productSessionId,
+        outpostId: assignment.outpostId,
+        credentialFetchToken: assignment.credentialFetchToken,
+        ...(assignment.model === undefined ? {} : { model: assignment.model }),
+      });
+      if (harness.kind !== assignment.harness) {
+        throw new Error(
+          `harness factory ${assignment.harness} created an adapter of kind ${harness.kind}`
         );
       }
-      credentials = createSessionCredentialStore(credential, { onLog: onPiLog });
-    }
-
-    // The same path every time this session starts, which is what makes a
-    // restart or a wake continue the conversation instead of opening a new one.
-    const piSessionFile = this.#piSessionFile(assignment.productSessionId);
-    const harness = new PiHarness({
-      outposts: this.#outposts,
-      outpostId: assignment.outpostId,
-      ...(model === undefined ? {} : { defaultModel: model }),
-      ...(piSessionFile === null ? {} : { piSessionFile }),
-      credentials,
-      onLog: onPiLog,
-    });
-
-    try {
       const harnessSession = await harness.createSession({
         productSessionId: assignment.productSessionId,
         workspacePath: assignment.workspacePath,
-        ...(model === undefined ? {} : { model }),
+        ...(assignment.model === undefined ? {} : { model: assignment.model }),
       });
       const diffs = new SessionDiffPublisher({
         controlPlaneUrl: this.#options.controlPlaneUrl,
@@ -610,7 +625,7 @@ export class HomesteadDaemon {
           repoName: repo.repoName,
           baseSha: repo.baseSha,
         })),
-        run: (fn) => this.#withWorkspaceHomestead(assignment, 10 * 60 * 1000, fn),
+        run: (fn, signal) => this.#withWorkspaceHomestead(assignment, 10 * 60 * 1000, fn, signal),
         log: (message, fields) => this.#log(message, fields),
       });
       const bridge = new BridgeSession({
@@ -618,18 +633,22 @@ export class HomesteadDaemon {
         harness,
         harnessSession,
         repositories,
-        runWorkspaceCommand: (command, timeoutMs) =>
-          this.#runWorkspaceCommand(assignment, command, timeoutMs),
-        onDiffRefreshRequested: (triggerMessageId) => diffs.refresh(triggerMessageId),
+        runWorkspaceCommand: (command, timeoutMs, signal) =>
+          this.#runWorkspaceCommand(assignment, command, timeoutMs, signal),
+        onDiffRefreshRequested: (triggerMessageId, signal) =>
+          diffs.refresh(triggerMessageId, signal),
+        onStartupFailure: (error) => this.#reportStartupFailure(assignment, "bridge_start", error),
         log: (message, fields) => this.#log(message, fields),
         onClosed: (productSessionId) => {
-          this.#sessions.delete(productSessionId);
+          if (this.#sessions.get(productSessionId) === bridge) {
+            this.#sessions.delete(productSessionId);
+          }
           // Keep the record, marked dormant: a session can sleep for months
           // and must wake against its original baseline. Expired dormant
           // records are pruned at startup.
           if (this.#stateStore) {
             void this.#track(
-              this.#stateStore.markDormant(productSessionId),
+              this.#stateStore.markDormant(productSessionId, assignment.sandboxId),
               `dormant marking for session ${productSessionId}`
             );
           }
@@ -637,6 +656,7 @@ export class HomesteadDaemon {
       });
       this.#sessions.set(assignment.productSessionId, bridge);
       await this.#stateStore?.save({ assignment, repositories, status: "active" }).catch(() => {});
+      stage = "bridge_start";
       bridge.start();
       this.#log("session started", {
         session: assignment.productSessionId,
@@ -644,48 +664,78 @@ export class HomesteadDaemon {
         workspace: assignment.workspacePath,
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       this.#log("session start failed", {
         session: assignment.productSessionId,
-        error: error instanceof Error ? error.message : String(error),
+        stage,
+        error: message,
       });
+      const bridge = this.#sessions.get(assignment.productSessionId);
+      if (bridge?.sandboxId === assignment.sandboxId) {
+        this.#sessions.delete(assignment.productSessionId);
+        await bridge.shutdown().catch((shutdownError: unknown) => {
+          this.#log("failed session cleanup did not finish", {
+            session: assignment.productSessionId,
+            error: shutdownError instanceof Error ? shutdownError.message : String(shutdownError),
+          });
+        });
+      }
+      await this.#reportStartupFailure(
+        assignment,
+        stage,
+        `${stage === "bridge_start" ? "Session bridge" : "Session harness"} failed to start: ${message}`
+      );
     }
   }
 
   /**
-   * Resolves how this session's Pi process will obtain a provider key.
-   *
-   * Normally that is a just-in-time fetch from the control plane, scoped to
-   * this session and answered from its owner's vault — the homestead itself holds
-   * no key and cannot substitute one. The provider is the provider half of the
-   * session's model spec, which is both the Pi provider id the credential is
-   * filed under and the vault entry the control plane resolves, so the two
-   * cannot disagree.
-   *
-   * The bearer is the assignment's credential-fetch token,
-   * never its bridge token: the fetch is all the agent process needs to do,
-   * and the bridge token would additionally let it open pull requests, upload
-   * media, spawn child sessions and post to Slack.
+   * Tell the session lifecycle that an accepted assignment never became
+   * usable. A reporting outage is logged locally and never allowed to take
+   * down this homestead or another session it serves.
    */
-  #piCredential(assignment: SessionAssign, model: string | undefined): PiCredential | undefined {
-    const providerId = providerOf(model);
-    if (providerId === undefined) return undefined;
-
-    const devKeyCommand = this.#options.devPiKeyCommand;
-    if (devKeyCommand) return { kind: "key-command", providerId, keyCommand: devKeyCommand };
-
-    return {
-      kind: "brokered",
-      providerId,
-      request: {
-        // The homestead's own view of the control plane, which is the one it can
-        // reach; the assignment's URL is the product's public address and is
-        // not always the same host in local development.
-        controlPlaneUrl: this.#options.controlPlaneUrl,
-        productSessionId: assignment.productSessionId,
-        provider: providerId,
-        credentialFetchToken: assignment.credentialFetchToken,
-      },
-    };
+  async #reportStartupFailure(
+    assignment: SessionAssign,
+    stage: SessionStartupFailureRequest["stage"],
+    error: string
+  ): Promise<void> {
+    const boundedError =
+      error.length <= MAX_SESSION_STARTUP_ERROR_LENGTH
+        ? error
+        : `${error.slice(0, MAX_SESSION_STARTUP_ERROR_LENGTH - 1)}…`;
+    const base = this.#options.controlPlaneUrl.replace(/\/+$/, "");
+    try {
+      const response = await fetch(
+        `${base}/sessions/${encodeURIComponent(assignment.productSessionId)}/startup-failure`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${assignment.sandboxAuthToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            stage,
+            error: boundedError,
+            sandboxId: assignment.sandboxId,
+            timestamp: Date.now(),
+          } satisfies SessionStartupFailureRequest),
+        }
+      );
+      if (!response.ok) {
+        this.#log("control plane refused session startup failure report", {
+          session: assignment.productSessionId,
+          sandbox_id: assignment.sandboxId,
+          stage,
+          http_status: response.status,
+        });
+      }
+    } catch (reportError) {
+      this.#log("session startup failure could not be reported", {
+        session: assignment.productSessionId,
+        sandbox_id: assignment.sandboxId,
+        stage,
+        error: reportError instanceof Error ? reportError.message : String(reportError),
+      });
+    }
   }
 
   /**
@@ -770,7 +820,8 @@ export class HomesteadDaemon {
   async #withWorkspaceHomestead<T>(
     assignment: SessionAssign,
     ttlMs: number,
-    fn: (run: WorkspaceHomestead) => Promise<T>
+    fn: (run: WorkspaceHomestead) => Promise<T>,
+    signal?: AbortSignal
   ): Promise<T> {
     const lease = await this.#outposts.createLease({
       outpostId: assignment.outpostId,
@@ -778,7 +829,19 @@ export class HomesteadDaemon {
       workspacePath: assignment.workspacePath,
       ttlMs,
     });
+    let cancellation: Promise<void> | null = null;
+    const cancel = (): Promise<void> => {
+      cancellation ??= this.#outposts
+        .cancelLeaseWork(assignment.outpostId, lease.leaseId)
+        .catch(() => {});
+      return cancellation;
+    };
+    const onAbort = (): void => {
+      void cancel();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const run: WorkspaceHomestead = async (command, timeoutMs) => {
+      if (signal?.aborted) throw new Error("workspace work cancelled during shutdown");
       const result = await this.#outposts.callTool(
         assignment.outpostId,
         lease.leaseId,
@@ -786,6 +849,7 @@ export class HomesteadDaemon {
         { command, timeoutMs },
         timeoutMs + 15_000
       );
+      if (signal?.aborted) throw new Error("workspace work cancelled during shutdown");
       if (!result.ok) {
         return {
           ok: false,
@@ -803,8 +867,14 @@ export class HomesteadDaemon {
       return { ok: true, ...output };
     };
     try {
+      if (signal?.aborted) {
+        await cancel();
+        throw new Error("workspace work cancelled during shutdown");
+      }
       return await fn(run);
     } finally {
+      signal?.removeEventListener("abort", onAbort);
+      if (signal?.aborted) await cancel();
       await this.#outposts
         .releaseLease(assignment.outpostId, lease.leaseId, "completed")
         .catch(() => {});
@@ -815,10 +885,14 @@ export class HomesteadDaemon {
   #runWorkspaceCommand(
     assignment: SessionAssign,
     command: string,
-    timeoutMs: number
+    timeoutMs: number,
+    signal?: AbortSignal
   ): Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number }> {
-    return this.#withWorkspaceHomestead(assignment, Math.max(timeoutMs + 60_000, 120_000), (run) =>
-      run(command, timeoutMs)
+    return this.#withWorkspaceHomestead(
+      assignment,
+      Math.max(timeoutMs + 60_000, 120_000),
+      (run) => run(command, timeoutMs),
+      signal
     );
   }
 
@@ -911,20 +985,6 @@ export class HomesteadDaemon {
 
   #log(message: string, fields?: Record<string, unknown>): void {
     (this.#options.log ?? (() => {}))(message, fields);
-  }
-}
-
-/**
- * Provider half of a `provider/model-id` spec. A spec Pi cannot parse yields
- * no provider here; the session then fails to start with Pi's own message
- * about the model, which names the actual problem.
- */
-function providerOf(model: string | undefined): string | undefined {
-  if (model === undefined) return undefined;
-  try {
-    return splitModelSpec(model).providerId;
-  } catch {
-    return undefined;
   }
 }
 

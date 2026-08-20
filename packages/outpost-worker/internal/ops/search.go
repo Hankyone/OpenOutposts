@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Hankyone/OpenOutposts/packages/outpost-worker/internal/protocol"
 )
@@ -67,6 +68,13 @@ func (x Executor) grep(ctx context.Context, workspace string, raw json.RawMessag
 	}
 
 	matches := make([]grepMatch, 0, 16)
+	budget, err := newJSONArrayBudget(
+		protocol.MaxToolOutputBytes,
+		grepResult{Matches: []grepMatch{}, Truncated: false},
+	)
+	if err != nil {
+		return nil, errorf(protocol.ErrExecution, "prepare grep result budget: %v", err)
+	}
 	truncated := false
 	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if ctx.Err() != nil {
@@ -107,6 +115,14 @@ func (x Executor) grep(ctx context.Context, workspace string, raw json.RawMessag
 		}
 		for _, match := range fileMatches {
 			match.Path = filepath.ToSlash(relative)
+			fits, budgetErr := budget.add(match)
+			if budgetErr != nil {
+				return errorf(protocol.ErrExecution, "encode grep match: %v", budgetErr)
+			}
+			if !fits {
+				truncated = true
+				return filepath.SkipAll
+			}
 			matches = append(matches, match)
 		}
 		if len(matches) >= maxMatches {
@@ -155,7 +171,11 @@ func grepFile(path string, pattern *regexp.Regexp, limit int) ([]grepMatch, erro
 			continue
 		}
 		if len(text) > maxGrepLineChars {
-			text = text[:maxGrepLineChars]
+			end := maxGrepLineChars
+			for end > 0 && !utf8.RuneStart(text[end]) {
+				end--
+			}
+			text = text[:end]
 		}
 		matches = append(matches, grepMatch{Line: lineNumber, Text: text})
 		if len(matches) >= limit {
@@ -198,6 +218,13 @@ func (x Executor) find(ctx context.Context, workspace string, raw json.RawMessag
 	}
 
 	paths := make([]string, 0, 16)
+	budget, err := newJSONArrayBudget(
+		protocol.MaxToolOutputBytes,
+		findResult{Paths: []string{}, Truncated: false},
+	)
+	if err != nil {
+		return nil, errorf(protocol.ErrExecution, "prepare find result budget: %v", err)
+	}
 	truncated := false
 	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if ctx.Err() != nil {
@@ -224,6 +251,14 @@ func (x Executor) find(ctx context.Context, workspace string, raw json.RawMessag
 		relative = filepath.ToSlash(relative)
 		if !pattern.MatchString(relative) {
 			return nil
+		}
+		fits, budgetErr := budget.add(relative)
+		if budgetErr != nil {
+			return errorf(protocol.ErrExecution, "encode find path: %v", budgetErr)
+		}
+		if !fits {
+			truncated = true
+			return filepath.SkipAll
 		}
 		paths = append(paths, relative)
 		if len(paths) >= maxResults {

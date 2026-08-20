@@ -823,6 +823,29 @@ describe("useSessionSocket", () => {
         "https://provider.example/new-sandbox"
       );
       expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
+      expect(result.current.startupError).toBe("spawn failed");
+    });
+  });
+
+  it("retains a persisted startup failure from the subscribed snapshot", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+      socket.receive({
+        ...createSubscribedMessage(),
+        state: createSessionState({ sandboxStatus: "failed" }),
+        spawnError: "repository clone failed",
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.startupError).toBe("repository clone failed");
     });
   });
 

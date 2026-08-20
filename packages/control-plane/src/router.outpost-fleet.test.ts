@@ -39,6 +39,8 @@ function createEnv(overrides?: { knownOutpostId?: string | null; ownerUserId?: s
         name: "Studio Mac mini",
         capabilities: { platform: "darwin", architecture: "arm64", operations: [] },
         connectionId: "connection-1",
+        connected: true,
+        lastHeartbeatAt: "2026-08-18T22:00:00.000Z",
         activeLeases: [
           {
             leaseId: "lease-1",
@@ -123,6 +125,8 @@ describe("GET /outposts/:id/sessions", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
+      connected: true,
+      lastHeartbeatAt: "2026-08-18T22:00:00.000Z",
       sessions: [
         {
           leaseId: "lease-1",

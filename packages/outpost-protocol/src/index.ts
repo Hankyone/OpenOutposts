@@ -390,6 +390,21 @@ export const homesteadRecoveryResponseSchema = z.object({
 });
 
 /**
+ * A homestead accepted an assignment, but could not finish bringing that
+ * exact execution generation online. This stays separate from transcript
+ * events: it is a lifecycle callback whose user-visible projection remains
+ * the existing sandbox spawn error.
+ */
+export const MAX_SESSION_STARTUP_ERROR_LENGTH = 2048;
+
+export const sessionStartupFailureRequestSchema = z.object({
+  stage: z.enum(["repository_clone", "harness_start", "bridge_start"]),
+  error: z.string().min(1).max(MAX_SESSION_STARTUP_ERROR_LENGTH),
+  sandboxId: identifierSchema,
+  timestamp: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+
+/**
  * The product's reasoning vocabulary, and what each effort means to a harness.
  *
  * It lives here rather than in either endpoint because both need the same
@@ -677,6 +692,7 @@ export type SessionAssignAccepted = z.infer<typeof sessionAssignAcceptedSchema>;
 export type SessionAssignRejected = z.infer<typeof sessionAssignRejectedSchema>;
 export type HomesteadRecoveryRequest = z.infer<typeof homesteadRecoveryRequestSchema>;
 export type HomesteadRecoveryResponse = z.infer<typeof homesteadRecoveryResponseSchema>;
+export type SessionStartupFailureRequest = z.infer<typeof sessionStartupFailureRequestSchema>;
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
 export type PromptGitIdentity = z.infer<typeof promptGitIdentitySchema>;
 export type PromptAuthor = z.infer<typeof promptAuthorSchema>;

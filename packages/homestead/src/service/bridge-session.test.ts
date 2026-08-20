@@ -31,7 +31,9 @@ class FakeWebSocket {
     this.sent.push(JSON.parse(data) as Record<string, unknown>);
   }
 
-  close(): void {}
+  close = vi.fn((): void => {
+    this.readyState = FakeWebSocket.CLOSED;
+  });
 
   emit(type: string, event: unknown): void {
     for (const listener of this.#listeners.get(type) ?? []) listener(event);
@@ -102,6 +104,16 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function promptCommand(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     type: "prompt",
@@ -122,6 +134,58 @@ function refusal(socket: FakeWebSocket): string {
   expect(complete?.success).toBe(false);
   return String(complete?.error ?? "");
 }
+
+describe("BridgeSession startup", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = [];
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  });
+
+  afterEach(() => {
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  it("reports a fatal control-plane refusal before the first bridge connection", async () => {
+    const { harness } = recordingHarness();
+    const onStartupFailure = vi.fn().mockResolvedValue(undefined);
+    const bridge = new BridgeSession({
+      assignment,
+      harness,
+      harnessSession,
+      onStartupFailure,
+      log: () => {},
+      onClosed: () => {},
+    });
+    bridge.start();
+    FakeWebSocket.instances[0].emit("close", { code: 4001 });
+    await settle();
+
+    expect(onStartupFailure).toHaveBeenCalledOnce();
+    expect(onStartupFailure).toHaveBeenCalledWith(
+      "Session bridge failed to start: the control plane closed the connection with code 4001"
+    );
+  });
+
+  it("does not call a startup failure an outage after the bridge connected", async () => {
+    const { harness } = recordingHarness();
+    const onStartupFailure = vi.fn().mockResolvedValue(undefined);
+    const bridge = new BridgeSession({
+      assignment,
+      harness,
+      harnessSession,
+      onStartupFailure,
+      log: () => {},
+      onClosed: () => {},
+    });
+    bridge.start();
+    const connected = FakeWebSocket.instances.at(-1)!;
+    connected.emit("open", {});
+    connected.emit("close", { code: 4001 });
+    await settle();
+
+    expect(onStartupFailure).not.toHaveBeenCalled();
+  });
+});
 
 describe("BridgeSession prompts", () => {
   beforeEach(() => {
@@ -255,6 +319,274 @@ describe("BridgeSession prompts", () => {
     await settle();
 
     expect(turns).toEqual([{ content: "hello" }]);
+  });
+});
+
+describe("BridgeSession shutdown", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = [];
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  function controlledTurn() {
+    const promptStarted = deferred();
+    const promptTerminal = deferred<HarnessEvent>();
+    const interruptFinished = deferred();
+    const interrupt = vi.fn(async () => {
+      await interruptFinished.promise;
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    const harness: AgentHarness = {
+      kind: "pi",
+      createSession: () => Promise.resolve(harnessSession),
+      async *sendPrompt() {
+        promptStarted.resolve();
+        yield await promptTerminal.promise;
+      },
+      interrupt,
+      close,
+    };
+    return { harness, promptStarted, promptTerminal, interruptFinished, interrupt, close };
+  }
+
+  function startControlledBridge(
+    harness: AgentHarness,
+    overrides: Partial<BridgeSessionOptions> = {}
+  ) {
+    const onClosed = vi.fn();
+    const onDiffRefreshRequested = vi.fn();
+    const bridge = new BridgeSession({
+      assignment,
+      harness,
+      harnessSession,
+      log: () => {},
+      onClosed,
+      onDiffRefreshRequested,
+      ...overrides,
+    });
+    bridge.start();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) throw new Error("the bridge opened no socket");
+    socket.emit("open", {});
+    socket.sent.length = 0;
+    return { bridge, socket, onClosed, onDiffRefreshRequested };
+  }
+
+  it("drains an active prompt and sends its terminal event before closing", async () => {
+    const turn = controlledTurn();
+    const { bridge, socket, onClosed, onDiffRefreshRequested } = startControlledBridge(
+      turn.harness
+    );
+    socket.deliver(promptCommand());
+    await turn.promptStarted.promise;
+
+    const shuttingDown = bridge.shutdown();
+    await settle();
+    expect(turn.interrupt).toHaveBeenCalledTimes(1);
+    expect(turn.close).not.toHaveBeenCalled();
+    expect(socket.close).not.toHaveBeenCalled();
+
+    turn.promptTerminal.resolve({ type: "turn.failed", message: "interrupted" });
+    await settle();
+    expect(socket.sent.filter((event) => event.type === "execution_complete")).toHaveLength(1);
+    expect(socket.close).not.toHaveBeenCalled();
+
+    turn.interruptFinished.resolve();
+    await shuttingDown;
+
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(turn.close).toHaveBeenCalledTimes(1);
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(onDiffRefreshRequested).not.toHaveBeenCalled();
+  });
+
+  it("makes concurrent shutdown callers await the same work", async () => {
+    const turn = controlledTurn();
+    const { bridge, socket, onClosed } = startControlledBridge(turn.harness);
+    socket.deliver(promptCommand());
+    await turn.promptStarted.promise;
+
+    const first = bridge.shutdown();
+    const second = bridge.shutdown();
+    expect(second).toBe(first);
+    turn.promptTerminal.resolve({ type: "turn.completed" });
+    turn.interruptFinished.resolve();
+    await Promise.all([first, second]);
+
+    expect(turn.interrupt).toHaveBeenCalledTimes(1);
+    expect(turn.close).toHaveBeenCalledTimes(1);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(onClosed).toHaveBeenCalledTimes(1);
+    expect(socket.sent.filter((event) => event.type === "execution_complete")).toHaveLength(1);
+  });
+
+  it("times out a hung drain and ignores a late terminal event", async () => {
+    const turn = controlledTurn();
+    const { bridge, socket, onClosed } = startControlledBridge(turn.harness);
+    socket.deliver(promptCommand());
+    await turn.promptStarted.promise;
+
+    const shuttingDown = bridge.shutdown();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await shuttingDown;
+
+    const terminalsAtClose = socket.sent.filter((event) => event.type === "execution_complete");
+    expect(terminalsAtClose).toHaveLength(1);
+    expect(terminalsAtClose[0]).toMatchObject({ success: false, messageId: "msg-1" });
+    expect(String(terminalsAtClose[0]?.error)).toContain("homestead shut down");
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(turn.close).toHaveBeenCalledTimes(1);
+    expect(onClosed).toHaveBeenCalledTimes(1);
+
+    turn.promptTerminal.resolve({ type: "turn.completed" });
+    turn.interruptFinished.resolve();
+    await settle();
+    expect(socket.sent.filter((event) => event.type === "execution_complete")).toHaveLength(1);
+  });
+
+  it("aborts and drains an in-flight push before closing", async () => {
+    const { harness } = recordingHarness();
+    const pushStarted = deferred();
+    const pushFinished = deferred<{
+      ok: boolean;
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    }>();
+    let pushSignal: AbortSignal | undefined;
+    const runWorkspaceCommand = vi.fn((_command, _timeoutMs, signal?: AbortSignal) => {
+      pushSignal = signal;
+      pushStarted.resolve();
+      return pushFinished.promise;
+    });
+    const { bridge, socket } = startControlledBridge(harness, { runWorkspaceCommand });
+    const push = {
+      type: "push",
+      pushSpec: {
+        remoteUrl: "https://example.test/octo/demo.git",
+        redactedRemoteUrl: "https://example.test/octo/demo.git",
+        refspec: "HEAD:refs/heads/work",
+        targetBranch: "work",
+      },
+    };
+    socket.deliver(push);
+    await pushStarted.promise;
+
+    const shuttingDown = bridge.shutdown();
+    expect(pushSignal?.aborted).toBe(true);
+    expect(socket.close).not.toHaveBeenCalled();
+    socket.deliver(push);
+    await settle();
+    expect(runWorkspaceCommand).toHaveBeenCalledTimes(1);
+
+    pushFinished.resolve({ ok: true, stdout: "", stderr: "", exitCode: 0 });
+    await shuttingDown;
+
+    expect(socket.sent.filter((event) => event.type === "push_complete")).toHaveLength(1);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts and drains the post-turn diff capture before closing", async () => {
+    const captureStarted = deferred();
+    const captureFinished = deferred();
+    let captureSignal: AbortSignal | undefined;
+    const onDiffRefreshRequested = vi.fn(
+      (triggerMessageId: string | null, signal?: AbortSignal) => {
+        expect(triggerMessageId).toBe("msg-1");
+        captureSignal = signal;
+        captureStarted.resolve();
+        return captureFinished.promise;
+      }
+    );
+    const { bridge, socket } = startControlledBridge(
+      scriptedHarness([{ type: "turn.completed" }]),
+      { onDiffRefreshRequested }
+    );
+    socket.deliver(promptCommand());
+    await captureStarted.promise;
+
+    const shuttingDown = bridge.shutdown();
+    expect(captureSignal?.aborted).toBe(true);
+    expect(socket.close).not.toHaveBeenCalled();
+    captureFinished.resolve();
+    await shuttingDown;
+
+    expect(onDiffRefreshRequested).toHaveBeenCalledTimes(1);
+    expect(socket.sent.filter((event) => event.type === "execution_complete")).toHaveLength(1);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts and drains a requested diff capture before closing", async () => {
+    const captureStarted = deferred();
+    const captureFinished = deferred();
+    let captureSignal: AbortSignal | undefined;
+    const onDiffRefreshRequested = vi.fn(
+      (triggerMessageId: string | null, signal?: AbortSignal) => {
+        expect(triggerMessageId).toBeNull();
+        captureSignal = signal;
+        captureStarted.resolve();
+        return captureFinished.promise;
+      }
+    );
+    const { harness } = recordingHarness();
+    const { bridge, socket } = startControlledBridge(harness, { onDiffRefreshRequested });
+    socket.deliver({ type: "refresh_diff" });
+    await captureStarted.promise;
+
+    const shuttingDown = bridge.shutdown();
+    expect(captureSignal?.aborted).toBe(true);
+    expect(socket.close).not.toHaveBeenCalled();
+    captureFinished.resolve();
+    await shuttingDown;
+
+    expect(onDiffRefreshRequested).toHaveBeenCalledTimes(1);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops generic events from side work that completes after the drain timeout", async () => {
+    const { harness } = recordingHarness();
+    const pushStarted = deferred();
+    const pushFinished = deferred<{
+      ok: boolean;
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    }>();
+    const runWorkspaceCommand = vi.fn((_command, _timeoutMs, signal?: AbortSignal) => {
+      pushStarted.resolve();
+      expect(signal).toBeDefined();
+      return pushFinished.promise;
+    });
+    const { bridge, socket } = startControlledBridge(harness, { runWorkspaceCommand });
+    socket.deliver({
+      type: "push",
+      pushSpec: {
+        remoteUrl: "https://example.test/octo/demo.git",
+        redactedRemoteUrl: "https://example.test/octo/demo.git",
+        refspec: "HEAD:refs/heads/work",
+        targetBranch: "work",
+      },
+    });
+    await pushStarted.promise;
+
+    const shuttingDown = bridge.shutdown();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await shuttingDown;
+    socket.readyState = FakeWebSocket.OPEN;
+
+    pushFinished.resolve({ ok: true, stdout: "", stderr: "", exitCode: 0 });
+    await settle();
+
+    expect(socket.sent.filter((event) => event.type === "push_complete")).toHaveLength(0);
+    expect(socket.close).toHaveBeenCalledTimes(1);
   });
 });
 

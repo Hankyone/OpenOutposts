@@ -48,6 +48,60 @@ function getHandler(method: string, path: string) {
 }
 
 describe("session runtime proxy routes", () => {
+  it("validates and forwards a startup failure report", async () => {
+    const requests: Request[] = [];
+    const fetch = vi.fn(async (request: Request) => {
+      requests.push(request);
+      return Response.json({ status: "failed" });
+    });
+    const { handler, match } = getHandler("POST", "/sessions/session-1/startup-failure");
+    const body = {
+      stage: "harness_start",
+      error: "Pi could not start",
+      sandboxId: "sandbox-1",
+      timestamp: 1_800_000_000_000,
+    };
+
+    const response = await handler(
+      new Request("https://test.local/sessions/session-1/startup-failure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      createEnv(fetch),
+      match,
+      createCtx()
+    );
+
+    expect(response.status).toBe(200);
+    expect(new URL(requests[0].url).pathname).toBe(SessionInternalPaths.startupFailure);
+    await expect(requests[0].json()).resolves.toEqual(body);
+  });
+
+  it("rejects an oversized startup failure without forwarding it", async () => {
+    const fetch = vi.fn(async () => Response.json({ status: "failed" }));
+    const { handler, match } = getHandler("POST", "/sessions/session-1/startup-failure");
+
+    const response = await handler(
+      new Request("https://test.local/sessions/session-1/startup-failure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stage: "bridge_start",
+          error: "x".repeat(2049),
+          sandboxId: "sandbox-1",
+          timestamp: 1,
+        }),
+      }),
+      createEnv(fetch),
+      match,
+      createCtx()
+    );
+
+    expect(response.status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("forwards event query strings through the session runtime dependency", async () => {
     const requests: Request[] = [];
     const fetch = vi.fn(async (request: Request) => {

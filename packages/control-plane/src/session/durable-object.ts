@@ -11,6 +11,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   HOMESTEAD_RECOVERY_VERSION,
   homesteadRecoveryRequestSchema,
+  sessionStartupFailureRequestSchema,
 } from "@openoutposts/outpost-protocol";
 import { initSchema } from "./schema";
 import {
@@ -130,6 +131,15 @@ const WS_AUTH_TIMEOUT_MS = 30000; // 30 seconds
  */
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+/** States in which an accepted assignment may still be starting. */
+const STARTUP_FAILURE_SANDBOX_STATUSES: ReadonlySet<SandboxStatus> = new Set([
+  "pending",
+  "spawning",
+  "connecting",
+  "warming",
+  "syncing",
+]);
+
 type BoundarySchema<T> = {
   safeParse(
     input: unknown
@@ -237,6 +247,7 @@ export class SessionDO extends DurableObject<Env> {
       this.sandboxHandler.verifySandboxToken(request, log),
     rotateSandboxCredentials: (request, _url, log) =>
       this.rotateSandboxCredentialsForRecovery(request, log),
+    startupFailure: (request, _url, log) => this.reportStartupFailure(request, log),
     openaiTokenRefresh: (_request, _url, log) => this.sandboxHandler.openaiTokenRefresh(log),
     scmCredentials: (_request, _url, log) => this.sandboxHandler.scmCredentials(log),
     tunnelUrls: (_request, _url, log) => this.sandboxHandler.tunnelUrls(log),
@@ -1967,6 +1978,65 @@ export class SessionDO extends DurableObject<Env> {
       },
       { headers: { "Cache-Control": "no-store" } }
     );
+  }
+
+  /**
+   * Record a failure that happened after the homestead accepted this exact
+   * assignment generation but before its bridge became usable.
+   */
+  private async reportStartupFailure(request: Request, log: Logger): Promise<Response> {
+    const parsed = sessionStartupFailureRequestSchema.safeParse(
+      await request.json().catch(() => null)
+    );
+    if (!parsed.success) {
+      return Response.json({ error: "Invalid startup failure report" }, { status: 400 });
+    }
+
+    const sandbox = this.repository.getSandbox();
+    if (!sandbox) {
+      return Response.json({ error: "No sandbox generation exists" }, { status: 404 });
+    }
+    if (sandbox.modal_sandbox_id !== parsed.data.sandboxId) {
+      log.warn("Startup failure refused for stale generation", {
+        event: "sandbox.startup_failure_refused",
+        expected_sandbox_id: sandbox.modal_sandbox_id,
+        reported_sandbox_id: parsed.data.sandboxId,
+        stage: parsed.data.stage,
+      });
+      return Response.json({ error: "Sandbox generation is no longer current" }, { status: 409 });
+    }
+    if (!STARTUP_FAILURE_SANDBOX_STATUSES.has(sandbox.status)) {
+      log.warn("Startup failure refused after generation left startup", {
+        event: "sandbox.startup_failure_refused",
+        sandbox_id: parsed.data.sandboxId,
+        sandbox_status: sandbox.status,
+        stage: parsed.data.stage,
+      });
+      return Response.json({ error: "Sandbox generation is no longer starting" }, { status: 409 });
+    }
+
+    await this.messageQueue.failStuckProcessingMessage();
+    this.repository.updateSandboxSpawnError(parsed.data.error, parsed.data.timestamp);
+    this.updateSandboxStatus("failed");
+    this.repository.clearSandboxCodeServer();
+    this.repository.clearSandboxTunnelUrls();
+    this.repository.clearSandboxTtyd();
+
+    const sandboxSocket = this.wsManager.getSandboxSocket();
+    if (sandboxSocket) {
+      this.wsManager.close(sandboxSocket, 1011, "homestead startup failed");
+      this.wsManager.clearSandboxSocket();
+    }
+
+    this.broadcast({ type: "sandbox_status", status: "failed" });
+    this.broadcast({ type: "sandbox_error", error: parsed.data.error });
+    log.error("Homestead reported startup failure", {
+      event: "sandbox.startup_failure",
+      sandbox_id: parsed.data.sandboxId,
+      stage: parsed.data.stage,
+      error: parsed.data.error,
+    });
+    return Response.json({ status: "failed" });
   }
 
   /**

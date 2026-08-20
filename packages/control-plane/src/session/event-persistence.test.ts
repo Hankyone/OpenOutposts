@@ -124,6 +124,25 @@ describe("boundSandboxEventForStorage", () => {
     expect(storedEventByteLength(stored)).toBeLessThanOrEqual(512);
   });
 
+  it("shrinks every large tool call field needed to meet the cap", () => {
+    const event: SandboxEvent = {
+      ...base,
+      type: "tool_call",
+      tool: "bash",
+      args: { command: "C".repeat(5000), note: "small" },
+      callId: "call-1",
+      output: "O".repeat(1000),
+    };
+    const original = structuredClone(event);
+
+    const stored = boundSandboxEventForStorage(event, 512);
+
+    expect(stored).not.toBeNull();
+    expect(storedEventByteLength(stored)).toBeLessThanOrEqual(512);
+    expect(stored).toMatchObject({ type: "tool_call", tool: "bash", callId: "call-1" });
+    expect(event).toEqual(original);
+  });
+
   it("shrinks a tool result's result, and its error when there is no result", () => {
     const withResult = boundSandboxEventForStorage(
       { ...base, type: "tool_result", callId: "call-1", result: "z".repeat(5000) },
@@ -140,6 +159,45 @@ describe("boundSandboxEventForStorage", () => {
     expect(errorOnly.result).toBe("");
   });
 
+  it("shrinks both large tool result fields when one reduction is insufficient", () => {
+    const stored = boundSandboxEventForStorage(
+      {
+        ...base,
+        type: "tool_result",
+        callId: "call-1",
+        result: "R".repeat(1000),
+        error: "E".repeat(5000),
+      },
+      512
+    );
+
+    expect(stored).not.toBeNull();
+    expect(storedEventByteLength(stored)).toBeLessThanOrEqual(512);
+  });
+
+  it("shrinks execution completion errors without losing completion identity", () => {
+    const stored = boundSandboxEventForStorage(
+      {
+        ...base,
+        type: "execution_complete",
+        success: false,
+        error: "failure ".repeat(1000),
+      },
+      512
+    );
+
+    expect(stored).not.toBeNull();
+    expect(stored).toMatchObject({
+      type: "execution_complete",
+      success: false,
+      messageId: "msg-1",
+      sandboxId: "sb-1",
+      truncated: true,
+    });
+    expect(stored?.error).toContain("truncated for storage");
+    expect(storedEventByteLength(stored)).toBeLessThanOrEqual(512);
+  });
+
   it("shrinks token content and error text", () => {
     const token = boundSandboxEventForStorage(
       { ...base, type: "token", content: "t".repeat(5000) },
@@ -154,12 +212,8 @@ describe("boundSandboxEventForStorage", () => {
     expect(error.error).toContain("truncated for storage");
   });
 
-  /**
-   * Nothing is guessed at. An event type with no dominant field is small by
-   * construction, and destroying an unfamiliar field would lose more than
-   * keeping the event whole.
-   */
-  it("leaves an event type it has no rule for alone", () => {
+  /** Nothing is guessed at: unfamiliar payload fields are not safe to destroy. */
+  it("skips an oversized event type that has no safe payload rule", () => {
     const event: SandboxEvent = {
       type: "user_message",
       content: "u".repeat(5000),
@@ -167,8 +221,51 @@ describe("boundSandboxEventForStorage", () => {
       timestamp: 1,
     };
     const stored = boundSandboxEventForStorage(event, 512);
-    expect(stored).toBe(event);
-    expect(stored.truncated).toBeUndefined();
+    expect(stored).toBeNull();
+  });
+
+  it("returns null when required structural metadata cannot fit", () => {
+    const event: SandboxEvent = {
+      ...base,
+      type: "execution_complete",
+      success: false,
+      error: "failure",
+    };
+
+    expect(boundSandboxEventForStorage(event, 8)).toBeNull();
+  });
+
+  it("hard-bounds every representative non-null stored copy", () => {
+    const events: SandboxEvent[] = [
+      { ...base, type: "token", content: "T".repeat(5000) },
+      { ...base, type: "error", error: "E".repeat(5000) },
+      {
+        ...base,
+        type: "tool_call",
+        tool: "write",
+        args: { path: "large.txt", content: "C".repeat(5000) },
+        callId: "call-1",
+      },
+      {
+        ...base,
+        type: "tool_result",
+        callId: "call-1",
+        result: "R".repeat(5000),
+      },
+      {
+        ...base,
+        type: "execution_complete",
+        success: false,
+        error: "X".repeat(5000),
+      },
+    ];
+
+    for (const event of events) {
+      const stored = boundSandboxEventForStorage(event, 512);
+      if (stored !== null) {
+        expect(storedEventByteLength(stored)).toBeLessThanOrEqual(512);
+      }
+    }
   });
 
   it("stays valid JSON at the ceiling", () => {
