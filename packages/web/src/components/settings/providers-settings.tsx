@@ -1,13 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { MODEL_OPTIONS } from "@open-inspect/shared";
 import {
+  cancelProviderOAuth,
+  completeProviderOAuth,
   deleteProviderCredential,
+  pollProviderOAuth,
   saveProviderApiKey,
+  startProviderOAuth,
   useProviderCredentials,
+  useProviderOAuthMethods,
   type ProviderCredential,
+  type ProviderOAuthMethod,
+  type ProviderOAuthStart,
 } from "@/hooks/use-provider-credentials";
 import { useModelCatalog } from "@/hooks/use-model-catalog";
 import { formatRelativeTime } from "@/lib/time";
@@ -46,13 +53,16 @@ interface ProviderRow {
   credential: ProviderCredential | null;
   /** How many models this provider reaches, when a catalog says so. */
   modelCount: number | null;
+  signIn: ProviderOAuthMethod | null;
 }
 
 function buildRows(
   credentials: ProviderCredential[],
-  catalog: ReturnType<typeof useModelCatalog>["catalog"]
+  catalog: ReturnType<typeof useModelCatalog>["catalog"],
+  methods: ProviderOAuthMethod[]
 ): ProviderRow[] {
   const byProvider = new Map<string, ProviderRow>();
+  const methodsById = new Map(methods.map((method) => [method.id, method]));
 
   const upsert = (id: string, patch: Partial<ProviderRow>) => {
     const existing = byProvider.get(id);
@@ -61,6 +71,7 @@ function buildRows(
       name: patch.name ?? existing?.name ?? BUNDLED_PROVIDER_NAMES.get(id) ?? id,
       credential: patch.credential ?? existing?.credential ?? null,
       modelCount: patch.modelCount ?? existing?.modelCount ?? null,
+      signIn: patch.signIn ?? existing?.signIn ?? methodsById.get(id) ?? null,
     });
   };
 
@@ -75,6 +86,14 @@ function buildRows(
     // Nothing has reported what the harness supports, so the bundled list is
     // the only guess available. It is a guess, and the page says so.
     for (const [id, name] of BUNDLED_PROVIDER_NAMES) upsert(id, { name });
+  }
+
+  for (const method of methods) {
+    if (byProvider.has(method.id)) {
+      upsert(method.id, { signIn: method });
+    } else {
+      upsert(method.id, { name: method.name, signIn: method });
+    }
   }
 
   // A credential always gets a row, including for a provider no catalog
@@ -96,13 +115,15 @@ function since(timestamp: number): string {
 }
 
 function CredentialSummary({ credential }: { credential: ProviderCredential }) {
+  const kind = credential.kind === "oauth_grant" ? "Signed in" : null;
   const parts = [
+    kind,
     `added ${since(credential.updatedAt)}`,
     credential.lastUsedAt ? `used ${since(credential.lastUsedAt)}` : "never used",
-  ];
+  ].filter(Boolean);
   return (
     <span className="text-xs text-muted-foreground">
-      {credential.label ? `${credential.label} • ` : ""}
+      {credential.label && credential.kind !== "oauth_grant" ? `${credential.label} • ` : ""}
       {parts.join(" • ")}
     </span>
   );
@@ -183,26 +204,211 @@ function ProviderKeyForm({
   );
 }
 
+function AuthorizationCodeSignIn({
+  provider,
+  started,
+  onDone,
+  onCancel,
+}: {
+  provider: ProviderRow;
+  started: Extract<ProviderOAuthStart, { flow: "authorization_code" }>;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [code, setCode] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function complete() {
+    if (!code.trim()) {
+      toast.error("Paste the redirected URL or authorization code");
+      return;
+    }
+    setSaving(true);
+    try {
+      await completeProviderOAuth(provider.id, code.trim());
+      setCode("");
+      toast.success(`Signed in to ${provider.name}`);
+      onDone();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to complete sign-in");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="border-t border-border px-4 py-3 space-y-3">
+      <p className="text-sm text-muted-foreground">{started.instructions}</p>
+      <a href={started.authorizeUrl} target="_blank" rel="noreferrer" className="text-sm underline">
+        Open {provider.name} sign-in
+      </a>
+      <div className="space-y-1.5">
+        <Label htmlFor={`provider-oauth-code-${provider.id}`}>
+          Authorization code or redirect URL
+        </Label>
+        <Input
+          id={`provider-oauth-code-${provider.id}`}
+          autoComplete="off"
+          spellCheck={false}
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
+          placeholder="http://localhost:53692/callback?code=..."
+        />
+      </div>
+      <div className="flex gap-2">
+        <Button size="sm" onClick={complete} disabled={saving}>
+          {saving ? "Signing in..." : "Complete sign-in"}
+        </Button>
+        <Button size="sm" variant="outline" onClick={onCancel} disabled={saving}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function DeviceCodeSignIn({
+  provider,
+  started,
+  onDone,
+  onCancel,
+}: {
+  provider: ProviderRow;
+  started: Extract<ProviderOAuthStart, { flow: "device_code" }>;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [waiting, setWaiting] = useState(true);
+  const onDoneRef = useRef(onDone);
+  const onCancelRef = useRef(onCancel);
+  onDoneRef.current = onDone;
+  onCancelRef.current = onCancel;
+
+  useEffect(() => {
+    const abort = new AbortController();
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const timer = window.setTimeout(resolve, ms);
+        abort.signal.addEventListener("abort", () => {
+          window.clearTimeout(timer);
+          resolve();
+        });
+      });
+
+    void (async () => {
+      let intervalMs = Math.max(1_000, started.intervalSeconds * 1000);
+      await sleep(intervalMs);
+      while (!abort.signal.aborted) {
+        try {
+          const polled = await pollProviderOAuth(provider.id);
+          if (abort.signal.aborted) return;
+          if (polled.status === "pending") {
+            if (polled.intervalSeconds && polled.intervalSeconds > 0) {
+              intervalMs = Math.max(1_000, polled.intervalSeconds * 1000);
+            }
+            await sleep(intervalMs);
+            continue;
+          }
+          if (polled.status === "complete") {
+            setWaiting(false);
+            toast.success(`Signed in to ${provider.name}`);
+            onDoneRef.current();
+            return;
+          }
+          setWaiting(false);
+          toast.error(polled.error);
+          onCancelRef.current();
+          return;
+        } catch (err) {
+          if (abort.signal.aborted) return;
+          setWaiting(false);
+          toast.error(err instanceof Error ? err.message : "Failed to poll sign-in");
+          onCancelRef.current();
+          return;
+        }
+      }
+    })();
+
+    return () => abort.abort();
+  }, [provider.id, provider.name, started.intervalSeconds]);
+
+  return (
+    <div className="border-t border-border px-4 py-3 space-y-3">
+      <p className="text-sm text-muted-foreground">
+        Enter this code at the provider, then return here. This page waits until you finish.
+      </p>
+      <div className="text-lg font-mono tracking-widest select-all">{started.userCode}</div>
+      <a
+        href={started.verificationUri}
+        target="_blank"
+        rel="noreferrer"
+        className="text-sm underline"
+      >
+        Open {provider.name} device sign-in
+      </a>
+      <p className="text-xs text-muted-foreground">
+        {waiting ? "Waiting for authorization..." : "Sign-in ended."}
+      </p>
+      <Button size="sm" variant="outline" onClick={onCancel}>
+        Cancel
+      </Button>
+    </div>
+  );
+}
+
 export function ProvidersSettings() {
   const { credentials, loading: loadingCredentials, mutate } = useProviderCredentials();
+  const { methods, loading: loadingMethods } = useProviderOAuthMethods();
   const { catalog, loading: loadingCatalog } = useModelCatalog();
   const [editing, setEditing] = useState<string | null>(null);
+  const [signIn, setSignIn] = useState<{ row: ProviderRow; started: ProviderOAuthStart } | null>(
+    null
+  );
+  const [starting, setStarting] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<ProviderRow | null>(null);
 
-  const rows = useMemo(() => buildRows(credentials, catalog), [credentials, catalog]);
+  const rows = useMemo(
+    () => buildRows(credentials, catalog, methods),
+    [credentials, catalog, methods]
+  );
 
   async function remove(provider: ProviderRow) {
     try {
       await deleteProviderCredential(provider.id);
       mutate();
-      toast.success(`${provider.name} key removed`);
+      toast.success(`${provider.name} disconnected`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to remove provider key");
     }
     setRemoveTarget(null);
   }
 
-  if (loadingCredentials || loadingCatalog) {
+  async function beginSignIn(row: ProviderRow) {
+    if (!row.signIn) return;
+    setEditing(null);
+    setStarting(row.id);
+    try {
+      const started = await startProviderOAuth(row.id);
+      const url =
+        started.flow === "authorization_code" ? started.authorizeUrl : started.verificationUri;
+      window.open?.(url, "_blank", "noopener,noreferrer");
+      setSignIn({ row, started });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to start subscription sign-in");
+    } finally {
+      setStarting(null);
+    }
+  }
+
+  async function closeSignIn() {
+    const providerId = signIn?.row.id;
+    setSignIn(null);
+    if (providerId) {
+      await cancelProviderOAuth(providerId);
+    }
+  }
+
+  if (loadingCredentials || loadingCatalog || loadingMethods) {
     return <div className="text-sm text-muted-foreground">Loading providers...</div>;
   }
 
@@ -210,8 +416,8 @@ export function ProvidersSettings() {
     <div>
       <h2 className="text-xl font-semibold text-foreground mb-1">Providers</h2>
       <p className="text-sm text-muted-foreground mb-6">
-        Your sessions run on the key you add here. It belongs to your account, is encrypted at rest,
-        and is never displayed again once saved.
+        Your sessions run on the key or subscription you add here. It belongs to your account, is
+        encrypted at rest, and is never displayed again once saved.
       </p>
 
       {!catalog && (
@@ -231,6 +437,7 @@ export function ProvidersSettings() {
       <div className="space-y-2">
         {rows.map((row) => {
           const isEditing = editing === row.id;
+          const isSigningIn = signIn?.row.id === row.id;
           const connected = row.credential !== null;
           return (
             <div key={row.id} className="border border-border">
@@ -265,10 +472,36 @@ export function ProvidersSettings() {
                           ? `Replace ${row.name} key`
                           : `Connect ${row.name}`
                     }
-                    onClick={() => setEditing(isEditing ? null : row.id)}
+                    onClick={() => {
+                      setSignIn(null);
+                      setEditing(isEditing ? null : row.id);
+                    }}
                   >
                     {isEditing ? "Cancel" : connected ? "Replace" : "Connect"}
                   </Button>
+                  {row.signIn && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      aria-label={
+                        isSigningIn ? `Cancel ${row.name} sign-in` : row.signIn.loginLabel
+                      }
+                      disabled={starting === row.id}
+                      onClick={() => {
+                        if (isSigningIn) {
+                          void closeSignIn();
+                          return;
+                        }
+                        void beginSignIn(row);
+                      }}
+                    >
+                      {isSigningIn
+                        ? "Cancel"
+                        : starting === row.id
+                          ? "Starting..."
+                          : row.signIn.loginLabel}
+                    </Button>
+                  )}
                   {connected && (
                     <Button
                       size="sm"
@@ -292,28 +525,31 @@ export function ProvidersSettings() {
                   onCancel={() => setEditing(null)}
                 />
               )}
+              {isSigningIn && signIn.started.flow === "authorization_code" && (
+                <AuthorizationCodeSignIn
+                  provider={row}
+                  started={signIn.started}
+                  onDone={() => {
+                    setSignIn(null);
+                    mutate();
+                  }}
+                  onCancel={() => void closeSignIn()}
+                />
+              )}
+              {isSigningIn && signIn.started.flow === "device_code" && (
+                <DeviceCodeSignIn
+                  provider={row}
+                  started={signIn.started}
+                  onDone={() => {
+                    setSignIn(null);
+                    mutate();
+                  }}
+                  onCancel={() => void closeSignIn()}
+                />
+              )}
             </div>
           );
         })}
-      </div>
-
-      {/*
-        Subscription sign-in is a real gap, not a coming-soon teaser: the
-        credential record already has a place for an OAuth grant, and nothing
-        issues or refreshes one. A disabled entry saying so is honest; a
-        working-looking button would not be.
-      */}
-      <h3 className="text-sm font-medium text-foreground mt-8 mb-2">Subscription sign-in</h3>
-      <div className="flex items-center justify-between gap-4 border border-border-muted px-4 py-3">
-        <div className="min-w-0">
-          <div className="text-sm text-muted-foreground">Sign in with a provider subscription</div>
-          <span className="text-xs text-muted-foreground">
-            Not built. API keys are the only credential a session can use today.
-          </span>
-        </div>
-        <Button size="sm" variant="outline" disabled>
-          Unavailable
-        </Button>
       </div>
 
       <AlertDialog open={!!removeTarget} onOpenChange={() => setRemoveTarget(null)}>

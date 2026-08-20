@@ -87,6 +87,7 @@ function issue(
 }
 
 interface IssuedCredential {
+  kind?: string;
   provider: string;
   credential_id: string;
   api_key: string;
@@ -109,6 +110,7 @@ describe("POST /sessions/:id/model-credentials", () => {
 
     const body = await response.json<IssuedCredential>();
     expect(body.provider).toBe("anthropic");
+    expect(body.kind).toBe("api_key");
     expect(body.api_key).toBe(ALICE_KEY);
     expect(body.expires_at_epoch_ms).toBeGreaterThanOrEqual(before + MODEL_CREDENTIAL_TTL_MS);
     expect(body.expires_at_epoch_ms).toBeLessThanOrEqual(Date.now() + MODEL_CREDENTIAL_TTL_MS);

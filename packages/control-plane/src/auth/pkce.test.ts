@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { InvalidPkceVerifierError, createPkceS256Challenge } from "./pkce";
+import {
+  InvalidPkceVerifierError,
+  createPkceS256Challenge,
+  createPkceS256Pair,
+  createPkceVerifier,
+  isPkceVerifier,
+} from "./pkce";
 
 describe("createPkceS256Challenge", () => {
   it("matches the RFC 7636 S256 test vector", async () => {
@@ -15,5 +21,15 @@ describe("createPkceS256Challenge", () => {
     await expect(createPkceS256Challenge("*".repeat(43))).rejects.toBeInstanceOf(
       InvalidPkceVerifierError
     );
+  });
+});
+
+describe("createPkceS256Pair", () => {
+  it("produces a 43-character verifier whose S256 challenge matches", async () => {
+    const pair = await createPkceS256Pair();
+    expect(isPkceVerifier(pair.verifier)).toBe(true);
+    expect(pair.verifier).toHaveLength(43);
+    await expect(createPkceS256Challenge(pair.verifier)).resolves.toBe(pair.challenge);
+    expect(createPkceVerifier()).not.toBe(createPkceVerifier());
   });
 });

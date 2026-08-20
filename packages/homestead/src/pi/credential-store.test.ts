@@ -251,6 +251,43 @@ describe("IssuedCredentialStore", () => {
 
     await expect(store.modify()).rejects.toThrow(/cannot be written from the agent process/);
   });
+
+  it("presents an OAuth grant to Pi without a refresh token Pi could rotate", async () => {
+    const clock = fakeClock();
+    let calls = 0;
+    const store = new IssuedCredentialStore({
+      providerId: "anthropic",
+      issue: () => {
+        calls += 1;
+        return Promise.resolve({
+          kind: "oauth",
+          apiKey: `access-${calls}`,
+          expiresAtEpochMs: clock.now() + HOUR_MS,
+        });
+      },
+      now: clock.now,
+      refreshSkewMs: 0,
+    });
+
+    await store.revalidate();
+    expect(await store.read("anthropic")).toEqual({
+      type: "oauth",
+      access: "access-1",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+    });
+    expect(await store.list()).toEqual([{ providerId: "anthropic", type: "oauth" }]);
+
+    clock.advance(HOUR_MS);
+    expect(await store.read("anthropic")).toEqual({
+      type: "oauth",
+      access: "access-2",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+    });
+    expect(calls).toBe(2);
+    await expect(store.modify()).rejects.toThrow(/cannot be written from the agent process/);
+  });
 });
 
 describe("unconfiguredCredentialStore", () => {
@@ -325,6 +362,34 @@ describe("createSessionCredentialStore", () => {
 
     await expect(store.revalidate()).rejects.toThrow(/No credential is connected/);
     expect(store.failure()?.retryable).toBe(false);
+  });
+
+  it("presents a control-plane OAuth grant to Pi without a refresh token", async () => {
+    const store = createSessionCredentialStore(
+      { kind: "brokered", providerId: "anthropic", request },
+      {
+        fetchImpl: (() =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({
+                provider: "anthropic",
+                kind: "oauth",
+                api_key: "access-from-vault",
+                expires_at_epoch_ms: Date.now() + HOUR_MS,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            )
+          )) as unknown as typeof fetch,
+      }
+    );
+
+    await store.revalidate();
+    expect(await store.read("anthropic")).toEqual({
+      type: "oauth",
+      access: "access-from-vault",
+      refresh: "",
+      expires: Number.MAX_SAFE_INTEGER,
+    });
   });
 
   describe("the development key command", () => {
@@ -410,6 +475,37 @@ describe("Pi's own resolution path", () => {
 
     clock.advance(HOUR_MS);
     expect((await runtime.getAuth(model))?.auth.apiKey).toBe("sk-key-2");
+  });
+
+  it("resolves an OAuth grant through this store without a local refresh", async () => {
+    const clock = fakeClock();
+    let calls = 0;
+    const store = new IssuedCredentialStore({
+      providerId: "anthropic",
+      issue: () => {
+        calls += 1;
+        return Promise.resolve({
+          kind: "oauth",
+          apiKey: `access-${calls}`,
+          expiresAtEpochMs: clock.now() + HOUR_MS,
+        });
+      },
+      now: clock.now,
+      refreshSkewMs: 0,
+    });
+    await store.revalidate();
+
+    const runtime = await ModelRuntime.create({ credentials: store, modelsPath: null });
+    const model = runtime.getModel("anthropic", "claude-sonnet-4-5");
+    if (!model) throw new Error("Pi's bundled catalogue no longer carries the offline test model");
+
+    const first = await runtime.getAuth(model);
+    expect(first?.source).toBe("OAuth");
+    expect(first?.auth.apiKey).toBe("access-1");
+
+    clock.advance(HOUR_MS);
+    expect((await runtime.getAuth(model))?.auth.apiKey).toBe("access-2");
+    expect(calls).toBe(2);
   });
 
   it("fails resolution rather than falling back to the ambient environment", async () => {

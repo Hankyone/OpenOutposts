@@ -68,6 +68,7 @@ const KEY_COMMAND_TIMEOUT_MS = 10_000;
  * operator key with no issued lifetime at all.
  */
 export interface ResolvedModelCredential {
+  kind?: "api_key" | "oauth";
   apiKey: string;
   expiresAtEpochMs?: number;
 }
@@ -204,10 +205,28 @@ export class IssuedCredentialStore implements SessionCredentialStore {
    * the next successful issuance, which the next turn's `revalidate` performs —
    * so a transient failure costs one turn and not a session.
    */
-  async read(providerId: string): Promise<{ type: "api_key"; key: string } | undefined> {
+  async read(
+    providerId: string
+  ): Promise<
+    | { type: "api_key"; key: string }
+    | { type: "oauth"; access: string; refresh: string; expires: number }
+    | undefined
+  > {
     if (providerId !== this.providerId) return undefined;
     if (this.#failure) throw this.#failure;
     const held = this.#held !== null && !this.#due() ? this.#held : await this.#issueNow();
+    if (held.kind === "oauth") {
+      // Pi refreshes OAuth grants through `modify`. This session's grant is
+      // refreshed in the control plane vault at issuance; a far-future expires
+      // keeps Pi from attempting a local refresh, and an empty refresh token
+      // means there is nothing here to leak or rotate.
+      return {
+        type: "oauth",
+        access: held.apiKey,
+        refresh: "",
+        expires: Number.MAX_SAFE_INTEGER,
+      };
+    }
     return { type: "api_key", key: held.apiKey };
   }
 
@@ -216,8 +235,9 @@ export class IssuedCredentialStore implements SessionCredentialStore {
    * this store takes that literally: listing is called during model-catalogue
    * refreshes, which must not cost the session an issuance.
    */
-  list(): Promise<readonly { providerId: string; type: "api_key" }[]> {
-    return Promise.resolve([{ providerId: this.providerId, type: "api_key" as const }]);
+  list(): Promise<readonly { providerId: string; type: "api_key" | "oauth" }[]> {
+    const type = this.#held?.kind === "oauth" ? "oauth" : "api_key";
+    return Promise.resolve([{ providerId: this.providerId, type }]);
   }
 
   /**
@@ -356,6 +376,7 @@ export function createSessionCredentialStore(
             ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
             ...(options.now === undefined ? {} : { now: options.now }),
           }).then((issued) => ({
+            kind: issued.kind,
             apiKey: issued.apiKey,
             expiresAtEpochMs: issued.expiresAtEpochMs,
           }))

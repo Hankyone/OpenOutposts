@@ -39,6 +39,7 @@ import { mcpServerRoutes } from "./routes/mcp-servers";
 import { analyticsRoutes } from "./routes/analytics";
 import { providerIdentityRoutes } from "./routes/provider-identities";
 import { userProviderCredentialRoutes } from "./routes/user-provider-credentials";
+import { providerOAuthSignInRoutes } from "./routes/provider-oauth-sign-in";
 import { sessionModelCredentialRoutes } from "./routes/session-model-credentials";
 import { sessionRoutes } from "./routes/sessions";
 import { outpostRoutes } from "./routes/outposts";
@@ -457,6 +458,7 @@ const routes: Route[] = [
   // Per-user provider credentials (owner-scoped) and the session-scoped
   // broker that issues them to a running harness.
   ...userProviderCredentialRoutes,
+  ...providerOAuthSignInRoutes,
   ...sessionModelCredentialRoutes,
 
   // Webhooks (public routes — auth handled per-route)

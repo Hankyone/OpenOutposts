@@ -8,7 +8,9 @@ import { SWRConfig } from "swr";
 import { MODEL_CATALOG_KEY, type ModelCatalogView } from "@/hooks/use-model-catalog";
 import {
   PROVIDER_CREDENTIALS_KEY,
+  PROVIDER_OAUTH_METHODS_KEY,
   type ProviderCredential,
+  type ProviderOAuthMethod,
 } from "@/hooks/use-provider-credentials";
 import { ProvidersSettings } from "./providers-settings";
 
@@ -61,9 +63,25 @@ const CREDENTIAL: ProviderCredential = {
   expiresAt: null,
 };
 
+const METHODS: ProviderOAuthMethod[] = [
+  {
+    id: "anthropic",
+    name: "Anthropic (Claude Pro/Max)",
+    loginLabel: "Sign in with Claude Pro/Max",
+    flow: "authorization_code",
+  },
+  {
+    id: "xai",
+    name: "xAI (Grok/X subscription)",
+    loginLabel: "Sign in with SuperGrok or X Premium",
+    flow: "device_code",
+  },
+];
+
 function renderSettings(options?: {
   catalog?: ModelCatalogView;
   credentials?: ProviderCredential[];
+  methods?: ProviderOAuthMethod[];
 }) {
   return render(
     <SWRConfig
@@ -72,6 +90,7 @@ function renderSettings(options?: {
         fallback: {
           [MODEL_CATALOG_KEY]: options?.catalog ?? CATALOG,
           [PROVIDER_CREDENTIALS_KEY]: { credentials: options?.credentials ?? [CREDENTIAL] },
+          [PROVIDER_OAUTH_METHODS_KEY]: { methods: options?.methods ?? METHODS },
         },
         dedupingInterval: Infinity,
         revalidateOnFocus: false,
@@ -162,9 +181,123 @@ describe("ProvidersSettings", () => {
     expect(screen.getByText("Anthropic")).toBeInTheDocument();
   });
 
-  it("marks subscription sign-in as unavailable rather than pretending it works", () => {
-    renderSettings();
+  it("starts paste-code subscription sign-in without putting the verifier on the page", async () => {
+    window.open = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          flow: "authorization_code",
+          provider: "anthropic",
+          authorizeUrl: "https://claude.ai/oauth/authorize?code_challenge=abc",
+          instructions: "Complete sign-in in the browser, then paste the redirected localhost URL.",
+        })
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
 
-    expect(screen.getByRole("button", { name: "Unavailable" })).toBeDisabled();
+    renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with Claude Pro/Max" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/provider-credentials/anthropic/oauth/start");
+    expect(init.method).toBe("POST");
+    expect(window.open).toHaveBeenCalledWith(
+      "https://claude.ai/oauth/authorize?code_challenge=abc",
+      "_blank",
+      "noopener,noreferrer"
+    );
+
+    expect(await screen.findByLabelText("Authorization code or redirect URL")).toBeInTheDocument();
+    expect(screen.getByText(/Complete sign-in in the browser/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("verifier");
+  });
+
+  it("completes a pasted authorization code through the credential route", async () => {
+    window.open = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            flow: "authorization_code",
+            provider: "anthropic",
+            authorizeUrl: "https://claude.ai/oauth/authorize?x=1",
+            instructions: "paste",
+          })
+        )
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "created" })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with Claude Pro/Max" }));
+    const paste = await screen.findByLabelText("Authorization code or redirect URL");
+    fireEvent.change(paste, {
+      target: { value: "http://localhost:53692/callback?code=the-code" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Complete sign-in" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe("/api/provider-credentials/anthropic/oauth/complete");
+    expect(JSON.parse(init.body)).toEqual({
+      code: "http://localhost:53692/callback?code=the-code",
+    });
+  });
+
+  it("shows a device code for headless subscription sign-in", async () => {
+    window.open = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          flow: "device_code",
+          provider: "xai",
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://auth.x.ai/device",
+          intervalSeconds: 60,
+          expiresInSeconds: 900,
+        })
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with SuperGrok or X Premium" }));
+
+    expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /device sign-in/i })).toHaveAttribute(
+      "href",
+      "https://auth.x.ai/device"
+    );
+  });
+
+  it("describes an OAuth grant as signed in, still without the secret", () => {
+    const { container } = renderSettings({
+      credentials: [
+        {
+          ...CREDENTIAL,
+          kind: "oauth_grant",
+          label: "Sign in with Claude Pro/Max",
+          expiresAt: Date.now() + 3600_000,
+        },
+      ],
+    });
+    expect(screen.getByText(/Signed in/)).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/sk-|oauth-access|refresh/);
+  });
+
+  it("keeps API key connect working next to subscription sign-in", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ status: "created" })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Connect OpenAI" }));
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "test-key-value" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/provider-credentials/openai");
   });
 });

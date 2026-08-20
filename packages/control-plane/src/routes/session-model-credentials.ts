@@ -185,6 +185,7 @@ async function handleIssueModelCredential(
 
   return new Response(
     JSON.stringify({
+      kind: result.kind,
       provider: result.provider,
       credential_id: result.credentialId,
       api_key: result.apiKey,

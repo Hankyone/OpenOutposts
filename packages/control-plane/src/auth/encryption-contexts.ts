@@ -53,6 +53,20 @@ export function providerCredentialContext(
 }
 
 /**
+ * A pending subscription-sign-in flow. Bound to the owner and the flow id so
+ * a ciphertext lifted onto another user's row, or onto a different flow,
+ * fails rather than completing someone else's login.
+ */
+export function providerOAuthFlowContext(userId: string, flowId: string): EncryptionContext {
+  return {
+    table: "provider_oauth_flows",
+    scopeKind: "user",
+    scopeId: userId,
+    keyName: flowId,
+  };
+}
+
+/**
  * Which of the three scoped secret stores, and which scope within it. The
  * secret key is supplied per value, so one scope descriptor covers a whole
  * read or write batch.

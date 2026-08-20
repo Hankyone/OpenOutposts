@@ -1,7 +1,13 @@
 import type { Logger } from "../logger";
 import {
+  getSubscriptionOAuthAdapterIfKnown,
+  ProviderOAuthRequestError,
+  type SubscriptionOAuthAdapter,
+} from "../auth/pi-oauth";
+import {
   ProviderCredentialDecryptionError,
   ProviderCredentialValidationError,
+  type DecryptedProviderCredential,
   type UserProviderCredentialStore,
 } from "../db/user-provider-credentials";
 
@@ -25,6 +31,13 @@ import {
 export const MODEL_CREDENTIAL_TTL_MS = 60 * 60 * 1000;
 
 /**
+ * How far before an OAuth access token's stated expiry the vault refreshes
+ * it. Matches Pi's typical skew so a token handed to a turn is still good
+ * when the response comes back.
+ */
+export const OAUTH_ACCESS_REFRESH_SKEW_MS = 5 * 60 * 1000;
+
+/**
  * Why an issuance was refused, as a closed vocabulary.
  *
  * Separate from `error`, which is prose for the harness's operator. This is the
@@ -36,11 +49,16 @@ export type ModelCredentialDenialReason =
   | "no_credential"
   | "unsupported_kind"
   | "credential_unusable"
+  | "oauth_grant_invalid"
+  | "provider_unavailable"
   | "storage_unavailable";
+
+export type ModelCredentialKind = "api_key" | "oauth";
 
 export type ModelCredentialResult =
   | {
       ok: true;
+      kind: ModelCredentialKind;
       provider: string;
       credentialId: string;
       apiKey: string;
@@ -57,6 +75,11 @@ export interface IssueModelCredentialInput {
   provider: string;
 }
 
+export interface ModelCredentialsServiceOptions {
+  now?: () => number;
+  adapterFor?: (provider: string) => SubscriptionOAuthAdapter | null;
+}
+
 /**
  * Issues a session's model credential from the owning user's vault.
  *
@@ -71,13 +94,25 @@ export interface IssueModelCredentialInput {
  * how long a session may keep using it before re-authorizing, and every
  * issuance is a fresh ownership check. It is not a claim that the key itself
  * expires.
+ *
+ * For an OAuth grant the material is a short-lived access token. If it is
+ * expired or within the refresh skew, this service refreshes against the
+ * provider, stores the rotated grant, and issues the new access token.
+ * Refresh tokens never leave the vault.
  */
 export class ModelCredentialsService {
+  private readonly now: () => number;
+  private readonly adapterFor: (provider: string) => SubscriptionOAuthAdapter | null;
+
   constructor(
     private readonly store: UserProviderCredentialStore,
     private readonly log: Logger,
-    private readonly now: () => number = () => Date.now()
-  ) {}
+    options: ModelCredentialsServiceOptions = {}
+  ) {
+    this.now = options.now ?? (() => Date.now());
+    this.adapterFor =
+      options.adapterFor ?? ((provider) => getSubscriptionOAuthAdapterIfKnown(provider));
+  }
 
   async issue(input: IssueModelCredentialInput): Promise<ModelCredentialResult> {
     let credential;
@@ -129,21 +164,32 @@ export class ModelCredentialsService {
       };
     }
 
-    if (credential.kind !== "api_key") {
-      // The column shape holds an OAuth grant, but issuing one means refreshing
-      // it against the provider first. Refusing beats handing a session an
-      // access token that may already be dead.
+    let kind: ModelCredentialKind;
+    let secret = credential.secret;
+    let providerExpiresAt = credential.secretExpiresAt;
+
+    if (credential.kind === "api_key") {
+      kind = "api_key";
+    } else if (credential.kind === "oauth_grant") {
+      const refreshed = await this.refreshOAuthIfDue(input, credential);
+      if (!refreshed.ok) return refreshed;
+      kind = "oauth";
+      secret = refreshed.access;
+      providerExpiresAt = refreshed.expiresAt;
+    } else {
       this.logDenied(input, "unsupported_kind");
       return {
         ok: false,
         status: 500,
-        error: "OAuth-backed provider credentials cannot be issued to a session yet",
+        error: "Stored provider credential has an unsupported kind",
         reason: "unsupported_kind",
       };
     }
 
     const issuedAt = this.now();
-    const expiresAtEpochMs = issuedAt + MODEL_CREDENTIAL_TTL_MS;
+    const ttlCap = issuedAt + MODEL_CREDENTIAL_TTL_MS;
+    const expiresAtEpochMs =
+      providerExpiresAt === null ? ttlCap : Math.min(ttlCap, providerExpiresAt);
 
     try {
       await this.store.touchLastUsed(input.ownerUserId, credential.id);
@@ -163,16 +209,98 @@ export class ModelCredentialsService {
       user_id: input.ownerUserId,
       provider: credential.provider,
       credential_id: credential.id,
+      kind,
       expires_at: expiresAtEpochMs,
     });
 
     return {
       ok: true,
+      kind,
       provider: credential.provider,
       credentialId: credential.id,
-      apiKey: credential.secret,
+      apiKey: secret,
       expiresAtEpochMs,
     };
+  }
+
+  private async refreshOAuthIfDue(
+    input: IssueModelCredentialInput,
+    credential: DecryptedProviderCredential
+  ): Promise<
+    | { ok: true; access: string; expiresAt: number | null }
+    | Extract<ModelCredentialResult, { ok: false }>
+  > {
+    const due =
+      credential.secretExpiresAt !== null &&
+      this.now() + OAUTH_ACCESS_REFRESH_SKEW_MS >= credential.secretExpiresAt;
+    if (!due) {
+      return { ok: true, access: credential.secret, expiresAt: credential.secretExpiresAt };
+    }
+
+    const adapter = this.adapterFor(credential.provider);
+    if (!adapter?.refresh || !credential.refreshSecret) {
+      this.logDenied(input, "oauth_grant_invalid");
+      return {
+        ok: false,
+        status: 409,
+        error: `The ${credential.provider} subscription has expired; sign in again`,
+        reason: "oauth_grant_invalid",
+      };
+    }
+
+    let tokens;
+    try {
+      tokens = await adapter.refresh(credential.refreshSecret);
+    } catch (e) {
+      if (e instanceof ProviderOAuthRequestError && e.invalidGrant) {
+        this.logDenied(input, "oauth_grant_invalid");
+        return {
+          ok: false,
+          status: 409,
+          error: `The ${credential.provider} subscription is no longer valid; sign in again`,
+          reason: "oauth_grant_invalid",
+        };
+      }
+      this.log.warn("model.oauth_refresh_failed", {
+        event: "model.oauth_refresh_failed",
+        session_id: input.sessionId,
+        user_id: input.ownerUserId,
+        provider: credential.provider,
+        credential_id: credential.id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return {
+        ok: false,
+        status: 502,
+        error: `Could not refresh the ${credential.provider} subscription`,
+        reason: "provider_unavailable",
+      };
+    }
+
+    try {
+      await this.store.rotateOAuthGrant({
+        userId: input.ownerUserId,
+        provider: credential.provider,
+        accessToken: tokens.access,
+        refreshToken: tokens.refresh,
+        expiresAt: tokens.expiresAt,
+      });
+    } catch (e) {
+      this.log.warn("model.oauth_rotate_failed", {
+        event: "model.oauth_rotate_failed",
+        session_id: input.sessionId,
+        credential_id: credential.id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return {
+        ok: false,
+        status: 502,
+        error: "Provider credential storage unavailable",
+        reason: "storage_unavailable",
+      };
+    }
+
+    return { ok: true, access: tokens.access, expiresAt: tokens.expiresAt };
   }
 
   private logDenied(input: IssueModelCredentialInput, reason: ModelCredentialDenialReason): void {

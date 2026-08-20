@@ -46,9 +46,28 @@ describe("fetchModelCredential", () => {
     expect(JSON.parse(String(seenInit?.body))).toEqual({ provider: "anthropic" });
     expect(credential).toEqual({
       provider: "anthropic",
+      kind: "api_key",
       apiKey: "sk-ant-secret",
       expiresAtEpochMs: 2_000,
     });
+  });
+
+  it("carries kind=oauth from the control plane without inventing a refresh token", async () => {
+    const credential = await fetchModelCredential(request, {
+      fetchImpl: (async () =>
+        jsonResponse(200, {
+          provider: "anthropic",
+          kind: "oauth",
+          credential_id: "cred-01",
+          api_key: "access-token",
+          expires_at_epoch_ms: 2_000,
+        })) as unknown as typeof fetch,
+      now: () => 1_000,
+    });
+
+    expect(credential.kind).toBe("oauth");
+    expect(credential.apiKey).toBe("access-token");
+    expect(credential).not.toHaveProperty("refresh");
   });
 
   it("treats a refusal about this user's credential as permanent", async () => {

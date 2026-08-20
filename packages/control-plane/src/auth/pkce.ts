@@ -25,3 +25,16 @@ export async function createPkceS256Challenge(verifier: string): Promise<string>
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
   return base64UrlEncode(new Uint8Array(digest));
 }
+
+/**
+ * 32 random bytes, base64url-encoded without padding — 43 characters, the
+ * RFC 7636 minimum and the length Pi's own OAuth helpers produce.
+ */
+export function createPkceVerifier(): string {
+  return base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+export async function createPkceS256Pair(): Promise<{ verifier: string; challenge: string }> {
+  const verifier = createPkceVerifier();
+  return { verifier, challenge: await createPkceS256Challenge(verifier) };
+}

@@ -23,7 +23,7 @@ import { decryptToken, encryptToken, generateId } from "../auth/crypto";
 import { providerCredentialContext } from "../auth/encryption-contexts";
 import type { SqlDatabase } from "./sql-database";
 
-/** Credential shapes the vault can hold. Only `api_key` is writable today. */
+/** Credential shapes the vault can hold. */
 export type ProviderCredentialKind = "api_key" | "oauth_grant";
 
 /**
@@ -92,6 +92,8 @@ export interface DecryptedProviderCredential {
   kind: ProviderCredentialKind;
   /** The API key, or the OAuth access token. */
   secret: string;
+  /** OAuth refresh token. Null for API keys and non-refreshable grants. */
+  refreshSecret: string | null;
   secretExpiresAt: number | null;
 }
 
@@ -106,6 +108,26 @@ export interface PutApiKeyResult {
   credential: ProviderCredentialMetadata;
   /** False when an existing credential for the same provider was replaced. */
   created: boolean;
+}
+
+export interface PutOAuthGrantInput {
+  userId: string;
+  provider: string;
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: number | null;
+  label?: string | null;
+}
+
+export type PutOAuthGrantResult = PutApiKeyResult;
+
+export interface RotateOAuthGrantInput {
+  userId: string;
+  provider: string;
+  accessToken: string;
+  /** Null keeps the stored refresh token (xAI may omit rotation). */
+  refreshToken: string | null;
+  expiresAt: number | null;
 }
 
 interface MetadataDbRow {
@@ -174,16 +196,16 @@ function normalizeLabel(label: string | null | undefined): string | null {
   return trimmed;
 }
 
-function validateSecret(secret: string): string {
+function validateSecret(secret: string, noun = "API key"): string {
   // Surrounding whitespace is the single most common paste artefact and is
   // never part of a provider key.
   const trimmed = secret.trim();
   if (!trimmed) {
-    throw new ProviderCredentialValidationError("API key must not be empty");
+    throw new ProviderCredentialValidationError(`${noun} must not be empty`);
   }
   if (trimmed.length > MAX_PROVIDER_SECRET_LENGTH) {
     throw new ProviderCredentialValidationError(
-      `API key must be at most ${MAX_PROVIDER_SECRET_LENGTH} characters`
+      `${noun} must be at most ${MAX_PROVIDER_SECRET_LENGTH} characters`
     );
   }
   return trimmed;
@@ -299,6 +321,163 @@ export class UserProviderCredentialStore {
     return { credential: toMetadata(row), created: !existing };
   }
 
+  /**
+   * Add or replace this user's OAuth grant for one provider.
+   *
+   * Same uniqueness rule as {@link putApiKey}: one row per owner per provider,
+   * so signing in replaces an API key for that provider rather than sitting
+   * beside it.
+   */
+  async putOAuthGrant(input: PutOAuthGrantInput): Promise<PutOAuthGrantResult> {
+    const provider = normalizeProviderId(input.provider);
+    const label = normalizeLabel(input.label);
+    const access = validateSecret(input.accessToken, "Access token");
+    const refresh =
+      input.refreshToken === null || input.refreshToken === undefined
+        ? null
+        : validateSecret(input.refreshToken, "Refresh token");
+    if (input.expiresAt !== null && input.expiresAt !== undefined) {
+      if (!Number.isFinite(input.expiresAt) || !Number.isInteger(input.expiresAt)) {
+        throw new ProviderCredentialValidationError("OAuth expiry must be an integer epoch ms");
+      }
+    }
+
+    const now = Date.now();
+    const secretEncrypted = await encryptToken(
+      access,
+      this.encryptionKey,
+      providerCredentialContext(input.userId, provider, "secret")
+    );
+    const refreshEncrypted =
+      refresh === null
+        ? null
+        : await encryptToken(
+            refresh,
+            this.encryptionKey,
+            providerCredentialContext(input.userId, provider, "refresh_secret")
+          );
+
+    const existing = await this.db
+      .prepare("SELECT id FROM user_provider_credentials WHERE user_id = ? AND provider = ?")
+      .bind(input.userId, provider)
+      .first<{ id: string }>();
+
+    const id = existing?.id ?? generateId();
+
+    await this.db
+      .prepare(
+        `INSERT INTO user_provider_credentials
+           (id, user_id, team_id, provider, label, kind, key_version,
+            secret_encrypted, refresh_secret_encrypted, secret_expires_at,
+            created_at, updated_at, last_used_at)
+         VALUES (?, ?, NULL, ?, ?, 'oauth_grant', ?, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(user_id, provider) DO UPDATE SET
+           label = excluded.label,
+           kind = excluded.kind,
+           key_version = excluded.key_version,
+           secret_encrypted = excluded.secret_encrypted,
+           refresh_secret_encrypted = excluded.refresh_secret_encrypted,
+           secret_expires_at = excluded.secret_expires_at,
+           last_used_at = NULL,
+           updated_at = excluded.updated_at`
+      )
+      .bind(
+        id,
+        input.userId,
+        provider,
+        label,
+        CURRENT_CREDENTIAL_KEY_VERSION,
+        secretEncrypted,
+        refreshEncrypted,
+        input.expiresAt ?? null,
+        now,
+        now
+      )
+      .run();
+
+    const row = await this.db
+      .prepare(
+        `SELECT ${METADATA_COLUMNS} FROM user_provider_credentials
+         WHERE user_id = ? AND provider = ?`
+      )
+      .bind(input.userId, provider)
+      .first<MetadataDbRow>();
+
+    if (!row) {
+      throw new Error("Provider credential write did not persist");
+    }
+
+    return { credential: toMetadata(row), created: !existing };
+  }
+
+  /**
+   * Replace the access (and maybe refresh) tokens of an existing OAuth grant.
+   * Used after a successful refresh during issuance; the row id and label stay.
+   */
+  async rotateOAuthGrant(input: RotateOAuthGrantInput): Promise<void> {
+    const provider = normalizeProviderId(input.provider);
+    const access = validateSecret(input.accessToken, "Access token");
+    const refresh =
+      input.refreshToken === null || input.refreshToken === undefined
+        ? null
+        : validateSecret(input.refreshToken, "Refresh token");
+
+    const secretEncrypted = await encryptToken(
+      access,
+      this.encryptionKey,
+      providerCredentialContext(input.userId, provider, "secret")
+    );
+    const now = Date.now();
+
+    if (refresh !== null) {
+      const refreshEncrypted = await encryptToken(
+        refresh,
+        this.encryptionKey,
+        providerCredentialContext(input.userId, provider, "refresh_secret")
+      );
+      const result = await this.db
+        .prepare(
+          `UPDATE user_provider_credentials
+           SET key_version = ?, secret_encrypted = ?, refresh_secret_encrypted = ?,
+               secret_expires_at = ?, updated_at = ?
+           WHERE user_id = ? AND provider = ? AND kind = 'oauth_grant'`
+        )
+        .bind(
+          CURRENT_CREDENTIAL_KEY_VERSION,
+          secretEncrypted,
+          refreshEncrypted,
+          input.expiresAt ?? null,
+          now,
+          input.userId,
+          provider
+        )
+        .run();
+      if ((result.meta?.changes ?? 0) === 0) {
+        throw new Error("OAuth grant rotation did not match a stored grant");
+      }
+      return;
+    }
+
+    const result = await this.db
+      .prepare(
+        `UPDATE user_provider_credentials
+         SET key_version = ?, secret_encrypted = ?, secret_expires_at = ?, updated_at = ?
+         WHERE user_id = ? AND provider = ? AND kind = 'oauth_grant'`
+      )
+      .bind(
+        CURRENT_CREDENTIAL_KEY_VERSION,
+        secretEncrypted,
+        input.expiresAt ?? null,
+        now,
+        input.userId,
+        provider
+      )
+      .run();
+    if ((result.meta?.changes ?? 0) === 0) {
+      throw new Error("OAuth grant rotation did not match a stored grant");
+    }
+  }
+
   /** Remove this user's credential for one provider. */
   async delete(userId: string, provider: string): Promise<boolean> {
     const normalized = normalizeProviderId(provider);
@@ -320,7 +499,8 @@ export class UserProviderCredentialStore {
     const normalized = normalizeProviderId(provider);
     const row = await this.db
       .prepare(
-        `SELECT id, provider, kind, key_version, secret_encrypted, secret_expires_at
+        `SELECT id, provider, kind, key_version, secret_encrypted,
+                refresh_secret_encrypted, secret_expires_at
          FROM user_provider_credentials WHERE user_id = ? AND provider = ?`
       )
       .bind(userId, normalized)
@@ -330,6 +510,7 @@ export class UserProviderCredentialStore {
         kind: ProviderCredentialKind;
         key_version: number;
         secret_encrypted: string;
+        refresh_secret_encrypted: string | null;
         secret_expires_at: number | null;
       }>();
 
@@ -342,6 +523,7 @@ export class UserProviderCredentialStore {
     }
 
     let secret: string;
+    let refreshSecret: string | null = null;
     try {
       // Bound to this owner and this provider: a ciphertext lifted from
       // another user's row, or from the same user's other provider, fails here
@@ -349,8 +531,15 @@ export class UserProviderCredentialStore {
       secret = await decryptToken(
         row.secret_encrypted,
         this.encryptionKey,
-        providerCredentialContext(userId, normalized)
+        providerCredentialContext(userId, normalized, "secret")
       );
+      if (row.kind === "oauth_grant" && row.refresh_secret_encrypted) {
+        refreshSecret = await decryptToken(
+          row.refresh_secret_encrypted,
+          this.encryptionKey,
+          providerCredentialContext(userId, normalized, "refresh_secret")
+        );
+      }
     } catch {
       throw new ProviderCredentialDecryptionError(row.id, row.provider);
     }
@@ -360,6 +549,7 @@ export class UserProviderCredentialStore {
       provider: row.provider,
       kind: row.kind,
       secret,
+      refreshSecret,
       secretExpiresAt: row.secret_expires_at,
     };
   }

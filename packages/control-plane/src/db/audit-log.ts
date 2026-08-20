@@ -145,6 +145,8 @@ export const AUDIT_REASONS = [
   "no_credential",
   "unsupported_kind",
   "credential_unusable",
+  "oauth_grant_invalid",
+  "provider_unavailable",
   "storage_unavailable",
   "invalid_request",
 ] as const;

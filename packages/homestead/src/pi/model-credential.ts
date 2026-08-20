@@ -47,6 +47,7 @@ export interface ModelCredentialRequest {
 
 export interface IssuedModelCredential {
   provider: string;
+  kind: "api_key" | "oauth";
   apiKey: string;
   expiresAtEpochMs: number;
 }
@@ -156,8 +157,11 @@ export async function fetchModelCredential(
     });
   }
 
+  const kind = record.kind === "oauth" ? "oauth" : "api_key";
+
   return {
     provider: typeof record.provider === "string" ? record.provider : request.provider,
+    kind,
     apiKey,
     expiresAtEpochMs,
   };
